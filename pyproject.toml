@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vod-porter"
+version = "0.1.0"
+description = "Stream archive transport/management CLI (currently supports Twitch -> YouTube; subcommands, staged ledger, JSON contract)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "google-auth>=2.23",
+    "google-auth-oauthlib>=1.1",
+    "google-auth-httplib2>=0.1.1",
+    "google-api-python-client>=2.108",
+    "yt-dlp>=2025.7.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "jsonschema>=4.20",
+    # setuptools/wheel: not a runtime dependency of vodp itself, but
+    # tests/test_packaging.py's R6 packaging AC needs them importable in
+    # *this* interpreter so it can run a real, fully offline
+    # ``pip install --no-build-isolation`` of the local project (no PyPI
+    # fetch for the build backend) into a throwaway --prefix.
+    "setuptools>=68",
+    "wheel",
+]
+
+[project.scripts]
+vodp = "vodp.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vodp = ["schemas/*.json", "profiles/*.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

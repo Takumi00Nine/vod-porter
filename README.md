@@ -1,251 +1,471 @@
-# Twitch配信アーカイブ YouTube自動アップロード
+**English** | [日本語](#日本語)
 
-Twitch APIを使用して配信アーカイブを自動的にYouTubeにアップロードするPythonスクリプトです。前日分の自動アップロードと、指定した日時範囲の手動アップロードに対応しています。
+# vodp -- Stream Archive Transport/Management CLI (currently Twitch → YouTube)
 
-## 機能
+![Python >=3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)
+![License MIT](https://img.shields.io/badge/license-MIT-green)
+![Tests 373 passing](https://img.shields.io/badge/tests-373%20passing-brightgreen)
 
-- **自動配信アーカイブ取得**: Twitch APIを使用して配信アーカイブを自動取得
-- **日本時間対応**: 日本標準時（JST）に基づいて動画の日時を判定
-- **日時範囲指定**: 指定した日時範囲の動画を手動でアップロード可能
-- **動画長制限**: YouTubeの制限（12時間）を超える動画は自動スキップ
-- **重複ダウンロード防止**: 既にダウンロード済みの動画は再ダウンロードしない
-- **自動アップロード**: YouTube Data API v3を使用して自動アップロード
-- **トークン自動更新**: YouTube APIのトークンは自動的に更新される
-- **ログ出力**: 詳細な処理ログを出力
-- **設定確認ツール**: `check_config.sh`でAPI設定を確認可能
-- **作者名タグ**: 設定した作者名を動画タグに自動追加
-- **フィルタリング改善**: 動画の作成日時でソートして正確な期間指定に対応
+## Overview
 
-## 必要な環境
+Subcommand CLI (`vodp`, package `vod-porter`) that discovers stream
+archives, downloads them, uploads them privately to a destination
+platform, verifies the readback, adds them to a playlist, and records
+every step in a crash-safe ledger so nothing is ever uploaded twice.
+Currently supports Twitch → YouTube; the engine/profile split keeps the
+door open to other source/destination pairs later. Replaces the old
+`app/`+`sh/` scripts, which have been deleted (2026-07-28, by request --
+they were a stopgap, not worth keeping around). The tag `v0-legacy` is
+the only rollback path: `git checkout v0-legacy` restores the last
+commit before this rewrite. See `docs/design.md` for the full design and
+`docs/requirements.md` for the requirements this satisfies.
 
-- Python 3.7以上
-
-## セットアップ
-
-### 1. 依存関係のインストール
+## Install
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-### 2. 仮想環境の作成（推奨）
+`vodp` needs Python ≥3.11 and `ffprobe` on `PATH` (from ffmpeg). Moving
+this repo to a new path? The venv itself does **not** survive a move
+(paths are baked into `pyvenv.cfg`/shebangs) -- delete `.venv` and re-run
+the two commands above at the new location.
 
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# または
-venv\Scripts\activate     # Windows
+## Configuration
+
+vodp's state/config directory (`VODP_HOME`) resolves in this order:
+`--home` > `$VODP_HOME` env var > `~/.vodp` (package default).
+
+```
+<VODP_HOME>/
+  .env              # secrets (see below) -- gitignored, 0600 recommended
+  auth/             # token.json (0600) + client_secret.json
+  profiles/         # optional per-install overrides of src/vodp/profiles/*.toml
+  ledger/           # <channel_id>.jsonl + registry.json (state, not code)
+  run/channels/      # flock files (multi-run guard)
+  logs/             # logs/YYYY-MM-DD.log, 1 line = 1 JSON, JST
+  downloads/        # transient download workspace
 ```
 
-### 3. API設定
-
-#### Twitch API設定
-1. [Twitch Developer Console](https://dev.twitch.tv/console) にアクセス
-2. 新しいアプリケーションを作成
-3. Client IDとClient Secretを取得
-
-#### YouTube API設定
-1. [Google Cloud Console](https://console.cloud.google.com/) にアクセス
-2. 新しいプロジェクトを作成
-3. **YouTube Data API v3**を有効化：
-   - 「APIとサービス」→「ライブラリ」
-   - 「YouTube Data API v3」を検索して有効化
-4. **OAuth 2.0クライアントID**を作成：
-   - 「APIとサービス」→「認証情報」
-   - 「認証情報を作成」→「OAuth 2.0クライアントID」
-   - アプリケーションの種類：「デスクトップアプリケーション」
-   - 名前：任意（例：「Twitch VOD Uploader」）
-5. **client_secret.json**をダウンロードして`config`フォルダに配置
-
-### 4. .envファイルの設定
-
-`env/.env.sample`を参考に`env/.env`ファイルを作成してください：
-
-```bash
-# テンプレートをコピー
-cp env/.env.sample env/.env
-
-# env/.envファイルを編集
-nano env/.env
-```
-
-`env/.env`ファイルの内容例：
+### Secrets: `<VODP_HOME>/.env`
 
 ```env
-# Twitch API設定
-TWITCH_CLIENT_ID=your_twitch_client_id
-TWITCH_CLIENT_SECRET=your_twitch_client_secret
-TWITCH_CHANNEL_NAME=your_channel_name
-TWITCH_CHANNEL_URL=https://www.twitch.tv/your_channel_name
-
-# 作者設定
-AUTHOR_NAME=your_author_name
-
-# アップロード設定
-DOWNLOAD_DIR=./downloads
-MAX_VIDEO_LENGTH=43200  # 12時間（YouTubeの制限）
+TWITCH_CLIENT_ID=...
+TWITCH_CLIENT_SECRET=...
+TWITCH_CHANNEL_LOGIN=your_channel_login
 ```
 
-## 使用方法
+Real environment variables always override the file (useful for launchd's
+`EnvironmentVariables` block without editing `.env`).
 
-### 設定確認
+### YouTube OAuth
+
+1. Download an OAuth "Desktop app" client from Google Cloud Console as
+   `<VODP_HOME>/auth/client_secret.json`.
+2. Run `vodp auth login` once, interactively, to mint `<VODP_HOME>/auth/token.json`.
+3. Already have a `token.pickle` from the old scripts? Run
+   `vodp auth migrate --pickle-path /path/to/token.pickle` instead of a
+   fresh login (refuses to overwrite an existing `token.json` -- it's
+   idempotent, not "latest wins").
+
+### Profiles: channel-specific values
+
+Everything channel-specific (title/description templates, tags,
+categoryId, playlist name, the migration-day cutoff) lives in a
+`<name>.toml` profile file, never as a literal value in `src/vodp`'s own
+*code* (see `src/vodp/profiles/example.toml`). vodp looks for
+`<name>.toml` in `<VODP_HOME>/profiles/` first (your override), then
+falls back to the default profiles shipped *inside* the `vodp` package
+itself (`src/vodp/profiles/*.toml`, installed as package data -- R6,
+Codex/tester review round 2: these used to live at the repo root, outside
+the installed package, so a real non-editable `pip install .` could never
+find its own default profile; a plain `pip install -e .` happened to
+paper over it by pointing straight back at the checkout). `--profile
+default` is used unless `--profile <name>` is given; a missing profile is
+exit 5, not exit 2 (it's a setup problem, not a bad argument).
+
+`[limits] earliest_date` guards against re-uploading anything the old
+scripts already published before you switched to `vodp` -- set it to your
+migration date. Applied identically by `--dry-run` and the real run
+(team-lead E2E follow-up: dry-run used to skip this cutoff entirely, so
+it could "promise" a VOD the real run then silently dropped, violating
+M7's "dry-run is a complete preview" guarantee) -- a VOD excluded by it
+is reported in both as `status: skipped, reason_code: out_of_range`
+(distinct from `dry_run`/no-op-because-already-uploaded etc.), and never
+counts as a found target for the `--allow-empty`/exit-3 decision.
+
+`[channel] expected_channel_id` (F5, Codex/tester review round 2,
+differed-items follow-up; requirements.md 推奨S7) is optional but
+recommended: every write-type command (`vods upload`, `videos publish`/
+`delete`, `meta set`, `playlist create`/`add`/`delete`/`remove-item`)
+confirms the currently authenticated account's channel id matches it
+*before* doing anything -- a wrong OAuth account (e.g. authorized
+against a personal channel by mistake) fails fast (exit 5) instead of
+silently uploading/publishing/deleting on the wrong channel with no one
+watching an unattended run. Leaving it unset (the packaged default)
+skips this check entirely -- it's opt-in, not a new default requirement.
+
+## Migrating from the old app/+sh/ scripts
+
+The old scripts are gone (not archived) -- this is the whole tool now.
+Switching over is: `vodp auth migrate` (or a fresh `vodp auth login`),
+set up `<VODP_HOME>/.env` and a profile with `[limits] earliest_date` set
+to today, hand it to the lead for a real end-to-end run, then point
+launchd at `vodp` instead of `sh/run_upload.sh` -- no parallel-run
+period, no scheduled deletion later. If you ever need to see the old
+code, `git checkout v0-legacy` is the only way; it is not present in this
+working tree.
+
+## Commands
+
+```
+vodp vods list --range 2026-07-27 2026-07-27
+vodp vods upload [--range START END] [--dry-run] [--max-uploads N] [--allow-empty]
+                 [--playlist NAME | --playlist-id ID] [--deadline SECONDS]
+vodp videos list | publish --video-id ID --privacy public | delete --video-id ID [--yes]
+vodp meta set --video-id ID [--title ...] [--description-file ...] [--tags a,b] [--category-id 22]
+                            [--playlist-id ID]
+vodp playlist list | create --name NAME | add --name NAME --video-id ID
+                    | delete --playlist-id ID [--yes] | remove-item --playlist-id ID --video-id ID [--yes]
+vodp cache clean [--yes] [--max-age-hours 24] [--channel ID]
+vodp ledger recover --channel ID | repair --channel ID | resolve --channel ID --vod ID --action reinsert|abandon --yes
+vodp auth login | migrate --pickle-path PATH
+vodp launchd generate --venv-python ABS_PATH --working-directory ABS_PATH [--out PATH]
+vodp check [--range START END]
+vodp whoami
+```
+
+Every subcommand accepts `--profile`, `--home`, `--non-interactive`,
+`--json` (accepted for compatibility; JSON is always on stdout, see
+below), and `--ledger` (ledger path override). `--range` accepts either a
+date (`2026-07-27`, expands to the full JST day) or a full datetime
+(`"2026-07-27 09:00:00"`). The lists above show the commands, not every
+flag (e.g. `--dry-run`, `playlist create --privacy`,
+`launchd generate --label`) -- run `vodp <command> <subcommand> --help`
+for the full option list. `meta set` only ever merge-updates
+`part=snippet` (title/description/tags/categoryId) -- it does *not*
+accept `--playlist` (only `--playlist-id`, see the M22 section below) and
+explicitly refuses `--privacy` (exit 2, R9, Codex/tester review round 2)
+rather than silently accepting and ignoring it; use
+`vodp videos publish --video-id ID --privacy ...` for a privacy change
+(it also does the readback verification M11 requires).
+
+Destructive commands (`videos delete`, `playlist delete`,
+`playlist remove-item`, `cache clean`) default to a **dry-run preview** and
+require `--yes` to actually execute; under `--non-interactive`, omitting
+`--yes` is an argument error (exit 2) instead of a silent no-op, so an
+unattended job never mistakes a preview for a completed action. Every one
+of them reads the target back (id+title, or ledger state for `cache
+clean`) *before* deciding anything, and refuses to delete -- in dry-run
+*and* with `--yes` alike -- if that readback can't confirm the target
+really exists (an empty `videos.list`/`playlists.list` result, a
+`playlistItems.list` API failure, or a ledger that's currently
+`ledger_corrupt`); see `tests/test_cli_youtube_commands.py` and
+`tests/test_cli_check_cache.py` for the misdeletion-prevention AC per
+command (Codex/tester review round 2, R5).
+
+## JSON contract & exit codes
+
+Every invocation prints exactly one JSON document to stdout:
+`{"run": {...}, "videos": [...], "summary": {...}}`, **except exit 2**,
+which never emits JSON at all -- only stderr text (usage from argparse
+itself, or a human message from a post-parse validation error like
+`--range` start > end). Exit 2 is "bad CLI argument", full stop,
+regardless of whether argparse or a handler caught it; every other exit
+code always includes the JSON envelope. Human-readable progress/errors
+otherwise go to stderr only.
+
+| Exit | Meaning |
+|---|---|
+| 0 | success, or all videos normally skipped |
+| 2 | bad CLI argument |
+| 3 | zero target videos (pass `--allow-empty` on `vods upload` to make this 0) |
+| 4 | interactive auth required (`--non-interactive` forbade it) -- run `vodp auth login` |
+| 5 | environment/API failure, or a ledger `recovery_required` row is blocking the channel |
+| 6 | one or more videos failed (e.g. `privacy_lock`) |
+
+Priority when several apply at once: `2 > 4 > 5 > 6 > 3 > 0`.
+
+## Unattended operation (launchd)
+
 ```bash
-# 設定確認スクリプト
-bash sh/check_config.sh
+vodp launchd generate \
+  --venv-python /abs/path/to/.venv/bin/vodp \
+  --working-directory /abs/path/to/repo \
+  --out ~/Library/LaunchAgents/com.vodp.vods-upload.plist
+launchctl load ~/Library/LaunchAgents/com.vodp.vods-upload.plist
 ```
 
-### 前日の動画をアップロード
+No shell wrapper: `vodp` is invoked directly by launchd (the old
+`sh/run_upload.sh` piped through `| tee`, which swallowed the real exit
+code -- see `docs/requirements.md` G18). The generated plist has no
+`KeepAlive` (a failed unattended run should not be relaunched immediately)
+and sets `VODP_HOME`/`PATH` explicitly.
+
+## Recovering from a lost `insert` response (ledger `recovery_required`)
+
+YouTube's `videos.insert` is not idempotent, so vodp never retries or
+auto-repeats it. If the network drops *after* the upload reached YouTube
+but *before* vodp recorded the response, the ledger row is left at
+`insert_inflight`. On the next run, vodp automatically searches your
+uploads for the hidden footer marker (`[vodp:vod=<twitch_vod_id>]`,
+appended to every description vodp writes) before doing anything else:
+
+- **found** -- the row resumes forward (publish/playlist/etc.) with no
+  new insert call.
+- **not found** -- the row moves to `recovery_required` and the whole run
+  exits 5. Resolve it manually:
+
+  ```bash
+  # confirm by hand: did the upload actually happen? Check YouTube Studio
+  # for a private video titled like the VOD, or search the description
+  # for the footer marker above.
+  vodp ledger recover --channel <channel_id>       # lists every unresolved row
+  vodp ledger resolve --channel <channel_id> --vod <twitch_vod_id> --action reinsert --yes   # confirmed NOT uploaded -> retry from scratch
+  vodp ledger resolve --channel <channel_id> --vod <twitch_vod_id> --action abandon  --yes   # confirmed uploaded (or give up) -> stop tracking it
+  ```
+
+  `reinsert` is refused if the row already carries a `youtube_video_id` or
+  reached `recovery_required` from a post-insert stage (uploaded,
+  processing, playlist, ...) -- in that case only `abandon` is offered,
+  because the video is confirmed to exist and re-inserting would create a
+  duplicate.
+
+A corrupt ledger (e.g. a torn write mid-crash) blocks all writes until
+`vodp ledger repair --channel <channel_id>` runs: it quarantines the
+original file and auto-drops the last line only if the file's tail is the
+one unambiguous signature of a torn write (missing trailing newline);
+anything else stays blocked for manual inspection.
+
+## Playlist URL in the description (M22)
+
+`--playlist NAME` resolves (or creates) the playlist exactly once per
+run, *before* any video's insert, so its URL is available to bake into
+every video's description via `{playlist_url}` -- or, if the template
+doesn't reference it, vodp appends `プレイリスト: <url>` as the final line
+automatically. Re-running (or `meta set` touching the description) is
+idempotent: the line converges instead of duplicating, and a description
+that already has a *different* playlist line is a hard conflict (exit 2),
+never silently overwritten. Creating a brand new playlist is refused
+(exit 2) if the description is already too close to the 5000-byte limit
+to safely absorb an unknown-length playlist ID -- pass `--playlist-id` for
+an existing playlist, or create it manually first, in that case.
+`--dry-run` only ever calls `playlists.list` (never creates), reporting
+`playlist_url` if found or `planned_playlist_title` if it would need
+creating.
+
+## Unattended resilience (M15)
+
+`--deadline SECONDS` (default 3600) bounds the whole run's wall-clock
+budget; `SIGTERM`/`SIGINT` are handled gracefully (1st signal stops
+taking on new work, 2nd aborts in-flight I/O, 3rd force-exits) with
+everything already durably recorded in the ledger up to that point.
+Idempotent reads (`videos.list`/`playlists.list`/`playlistItems.list`/
+`channels.list`/`videos.update`) share one finite retry-with-backoff
+budget for the whole run; the three non-idempotent writes
+(`videos.insert`/`playlists.insert`/`playlistItems.insert`) are never
+retried (`num_retries=0`), by construction -- see
+`src/vodp/infra/retry.py`. The deadline is checked between VODs, at the
+ffprobe step (bounds its subprocess timeout), before each resumable-
+upload chunk, and on every yt-dlp `progress_hooks` callback during the
+download itself (F6, Codex/tester review round 2, differed-items
+follow-up) -- yt-dlp's own `socket_timeout` option is also set from the
+remaining deadline, so a stalled connection can't hang forever even
+between progress callbacks. Full internal propagation into yt-dlp's
+download loop isn't practical, but these two together are enough to
+guarantee it never hangs past the deadline. The one remaining
+genuinely out-of-scope gap is an **interactive OAuth wait** (`vodp auth
+login`'s browser flow) -- non-interactive/dry-run runs never open one at
+all (M6/M7), so this only affects an operator running `auth login` by
+hand.
+
+## Known limitations (time-boxed scope, flagged for follow-up)
+
+- Real API/OAuth end-to-end verification, and the actual repo move to
+  `~/work/tools/twitch-vods-to-youtube/`, are the lead's responsibility
+  (docs/design.md §11) -- everything in this repo is tested fully offline
+  (`pytest -q`, socket access blocked by `tests/conftest.py`).
+- A stuck playlist-creation write-ahead row (`__playlist__:<name>`,
+  `playlist_create_inflight`/`recovery_required`) is only reconciled when
+  a *future* run has candidate VODs **and** requests that same playlist
+  again; it isn't picked up range-independently the way a video-level
+  `recovery_required` row is. `vodp ledger recover --channel ID` still
+  lists it once it's stuck, and `vodp ledger resolve` still works on it.
+- `advance()`'s `expected_stage` guard accepts the row's *current* stage
+  as a match rather than enumerating the specific allowed prior stage(s)
+  for every transition; it catches stale/out-of-order writes but not
+  every theoretically-invalid one.
+
+## Development
+
 ```bash
-# シェルスクリプト経由
-bash sh/run_upload.sh
+./.venv/bin/python -m pytest -q
 ```
 
-### 指定した日時範囲の動画をアップロード
+All tests are fully offline (Twitch/YouTube/yt-dlp/ffprobe are faked --
+see `tests/fakes.py` and `docs/design.md` §10); `tests/conftest.py` blocks
+real socket connections as a backstop. The one exception is
+`tests/test_packaging.py` (M21/R6): it does a real, non-editable
+`pip install --no-build-isolation --no-deps` of this repo into a
+throwaway `--prefix`, using *this* interpreter's own setuptools/wheel
+(dev dependency) rather than PyPI, so it stays offline too -- this is
+what confirms `src/vodp/profiles/*.toml` actually ships as installed
+package data instead of only working by accident via an editable
+install's back-reference to the repo checkout.
+
+---
+
+## 日本語
+
+# vodp -- 配信アーカイブの運搬・管理 CLI（現在は Twitch → YouTube 対応）
+
+## 概要
+
+サブコマンド型 CLI（コマンド名 `vodp`、パッケージ名 `vod-porter`）。配信アーカイブを検出し、ダウンロードし、非公開状態で配信先プラットフォームへアップロードし、公開範囲を読み戻して検証し、プレイリストへ追加し、すべての段階をクラッシュ耐性のある台帳に記録することで二重投稿を防ぐ。現状は Twitch → YouTube に対応しているが、エンジンとプロファイルを分離した設計になっており、将来別の配信元/配信先の組み合わせにも拡張可能。旧 `app/`+`sh/` スクリプトを置き換えるもので、それらはすでに削除済み（2026-07-28・本人指示・つなぎのスクリプトで残す価値なしと判断）。`v0-legacy` タグが唯一のロールバック経路であり、`git checkout v0-legacy` でこの書き直し前の最終コミットへ戻せる。全体設計は `docs/design.md`、それが満たす要件は `docs/requirements.md` を参照。
+
+## インストール
+
 ```bash
-# シェルスクリプト経由で日時範囲指定
-bash sh/run_upload.sh --range "2025/08/04 00:00:00" "2025/08/04 23:59:59"  # 完全な日時指定
-bash sh/run_upload.sh --range "2025/08/04" "2025/08/04"  # 日付のみ指定（時刻は00:00:00から23:59:59）
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-### 設定確認と動画検索
+`vodp` の実行には Python ≥3.11 と、PATH 上の `ffprobe`（ffmpeg 同梱）が必要。本リポジトリを別パスへ移動する場合、venv 自体は移動に耐えない（`pyvenv.cfg`/shebang に絶対パスが焼き込まれるため）。`.venv` を削除し、新しい場所で上記2コマンドを再実行すること。
+
+## 設定
+
+vodp の状態/設定ディレクトリ（`VODP_HOME`）は次の優先順位で解決される：
+`--home` > `$VODP_HOME` 環境変数 > `~/.vodp`（パッケージ既定）。
+
+```
+<VODP_HOME>/
+  .env              # 秘密情報（下記参照）-- gitignore 対象・0600 推奨
+  auth/             # token.json (0600) + client_secret.json
+  profiles/         # src/vodp/profiles/*.toml のインストール別上書き（任意）
+  ledger/           # <channel_id>.jsonl + registry.json（状態であってコードではない）
+  run/channels/      # flock ファイル（多重起動防止）
+  logs/             # logs/YYYY-MM-DD.log、1行1JSON、JST
+  downloads/        # ダウンロード用の一時作業領域
+```
+
+### 秘密情報: `<VODP_HOME>/.env`
+
+```env
+TWITCH_CLIENT_ID=...
+TWITCH_CLIENT_SECRET=...
+TWITCH_CHANNEL_LOGIN=your_channel_login
+```
+
+実環境変数は常にファイルより優先される（`.env` を編集せずに launchd の `EnvironmentVariables` ブロックで上書きする用途に便利）。
+
+### YouTube OAuth
+
+1. Google Cloud Console から OAuth「デスクトップアプリ」クライアントをダウンロードし、`<VODP_HOME>/auth/client_secret.json` として保存する。
+2. `vodp auth login` を一度だけ対話的に実行し、`<VODP_HOME>/auth/token.json` を発行する。
+3. 旧スクリプトの `token.pickle` が既にある場合は、新規ログインの代わりに `vodp auth migrate --pickle-path /path/to/token.pickle` を実行する（既存の `token.json` は上書きせず拒否する＝冪等であり「後勝ち」ではない）。
+
+### プロファイル: チャンネル固有の値
+
+チャンネル固有の値（タイトル/説明テンプレート・タグ・categoryId・プレイリスト名・移行日カットオフ）はすべて `<name>.toml` プロファイルファイルに置き、`src/vodp` 自身のコードにリテラル値として書かない（`src/vodp/profiles/example.toml` を参照）。vodp はまず `<VODP_HOME>/profiles/` 内の `<name>.toml`（個別上書き）を探し、見つからなければ `vodp` パッケージ自体に同梱された既定プロファイル（`src/vodp/profiles/*.toml`、パッケージデータとしてインストールされる -- R6・Codex/tester レビュー第2ラウンド：以前はリポジトリのルートに置かれておりインストール済みパッケージの外側だったため、非editableな実 `pip install .` では自分自身の既定プロファイルを見つけられなかった。`pip install -e .` はチェックアウト先を直接参照するため、たまたま問題を覆い隠していた）にフォールバックする。`--profile <name>` を指定しない限り `--profile default` が使われる。プロファイルが見つからない場合は exit 2 ではなく exit 5（引数不正ではなくセットアップの問題のため）。
+
+`[limits] earliest_date` は、`vodp` へ切り替える前に旧スクリプトが既に公開したものを再アップロードしないためのガードであり、自分の移行日を設定する。`--dry-run` と実実行のどちらでも同一に適用される（team-lead E2E フォローアップ：以前は dry-run がこのカットオフを完全にスキップしており、dry-run が「約束」した VOD を実実行が黙って除外してしまうことがあり、M7 の「dry-run は完全なプレビュー」という保証に違反していた）-- このカットオフで除外された VOD は両方とも `status: skipped, reason_code: out_of_range`（`dry_run`／既にアップロード済みによる no-op 等とは区別される）として報告され、`--allow-empty`/exit-3 判定における「見つかった対象」としてはカウントされない。
+
+`[channel] expected_channel_id`（F5・Codex/tester レビュー第2ラウンド、差分項目のフォローアップ；requirements.md 推奨S7）は任意だが推奨設定：書込系コマンド（`vods upload`・`videos publish`/`delete`・`meta set`・`playlist create`/`add`/`delete`/`remove-item`）はすべて、実行前に現在認証中のアカウントのチャンネルIDがこの値と一致することを確認する -- 誤った OAuth アカウント（例：個人チャンネルで誤って認可）は、無人実行を誰も見ていない状況で誤ったチャンネルへ黙ってアップロード/公開/削除する代わりに、即座に失敗する（exit 5）。未設定（パッケージ既定）の場合はこのチェック自体をスキップする -- 新たな既定要件ではなく opt-in。
+
+## 旧 app/+sh/ スクリプトからの移行
+
+旧スクリプトはアーカイブではなく削除済み -- これが唯一のツールとなる。切り替え手順は：`vodp auth migrate`（または新規に `vodp auth login`）を実行し、`<VODP_HOME>/.env` と `[limits] earliest_date` を今日の日付に設定したプロファイルを用意し、実際の end-to-end 実行をリーダーに委ねてから、launchd の実行対象を `sh/run_upload.sh` から `vodp` へ切り替える -- 並走期間なし、後日の削除スケジュールもなし。旧コードを確認する必要がある場合は `git checkout v0-legacy` が唯一の方法であり、この作業ツリーには存在しない。
+
+## コマンド
+
+```
+vodp vods list --range 2026-07-27 2026-07-27
+vodp vods upload [--range START END] [--dry-run] [--max-uploads N] [--allow-empty]
+                 [--playlist NAME | --playlist-id ID] [--deadline SECONDS]
+vodp videos list | publish --video-id ID --privacy public | delete --video-id ID [--yes]
+vodp meta set --video-id ID [--title ...] [--description-file ...] [--tags a,b] [--category-id 22]
+                            [--playlist-id ID]
+vodp playlist list | create --name NAME | add --name NAME --video-id ID
+                    | delete --playlist-id ID [--yes] | remove-item --playlist-id ID --video-id ID [--yes]
+vodp cache clean [--yes] [--max-age-hours 24] [--channel ID]
+vodp ledger recover --channel ID | repair --channel ID | resolve --channel ID --vod ID --action reinsert|abandon --yes
+vodp auth login | migrate --pickle-path PATH
+vodp launchd generate --venv-python ABS_PATH --working-directory ABS_PATH [--out PATH]
+vodp check [--range START END]
+vodp whoami
+```
+
+すべてのサブコマンドは `--profile`・`--home`・`--non-interactive`・`--json`（互換性のため受け付けるが、JSON は常に stdout に出力される。下記参照）・`--ledger`（台帳パスの上書き）を受け付ける。`--range` は日付のみ（`2026-07-27`、JST の1日全体に展開）または完全な日時（`"2026-07-27 09:00:00"`）を受け付ける。上記の一覧はコマンドの一覧であり、全フラグを網羅したものではない（例: `--dry-run`・`playlist create --privacy`・`launchd generate --label`）-- 全オプションを確認するには `vodp <command> <subcommand> --help` を実行すること。`meta set` は常に `part=snippet`（title/description/tags/categoryId）のマージ更新のみを行う -- `--playlist` は受け付けず（`--playlist-id` のみ、下記 M22 節参照）、`--privacy` は明示的に拒否する（exit 2、R9、Codex/tester レビュー第2ラウンド）-- 黙って受理して無視するのではなく。公開範囲を変更する場合は `vodp videos publish --video-id ID --privacy ...` を使うこと（M11 が要求する読み戻し検証も行う）。
+
+破壊的コマンド（`videos delete`・`playlist delete`・`playlist remove-item`・`cache clean`）は既定で **dry-run プレビュー** となり、実際に実行するには `--yes` が必須。`--non-interactive` 下で `--yes` を省略すると、サイレントな no-op ではなく引数エラー（exit 2）となるため、無人ジョブがプレビューを完了扱いと誤認することはない。いずれのコマンドも何かを決定する前に対象を読み戻し（id+タイトル、`cache clean` の場合は台帳状態）、その読み戻しで対象の実在が確認できない場合（`videos.list`/`playlists.list` の結果が空、`playlistItems.list` の API 失敗、または台帳が現在 `ledger_corrupt` の場合）は、dry-run でも `--yes` 付きでも削除を拒否する。コマンドごとの誤削除防止の受入条件は `tests/test_cli_youtube_commands.py` と `tests/test_cli_check_cache.py`（Codex/tester レビュー第2ラウンド、R5）を参照。
+
+## JSON契約と終了コード
+
+すべての呼び出しは、stdout に厳密に1つの JSON ドキュメントを出力する：`{"run": {...}, "videos": [...], "summary": {...}}`。**exit 2 のみ例外**で JSON を一切出力せず、stderr のテキストのみとなる（argparse 自身の usage、または `--range` 開始>終了のようなパース後バリデーションエラーの人間向けメッセージ）。exit 2 は argparse とハンドラのどちらが捕捉したかに関わらず「不正な CLI 引数」を意味し、それ以外の終了コードは常に JSON エンベロープを含む。人間向けの進捗/エラーはそれ以外は stderr のみに出力される。
+
+| 終了コード | 意味 |
+|---|---|
+| 0 | 成功、または全動画が正常にスキップ |
+| 2 | CLI 引数不正 |
+| 3 | 対象動画0件（`vods upload` に `--allow-empty` を渡すとこれが0になる） |
+| 4 | 対話認証が必要（`--non-interactive` がそれを禁止した）-- `vodp auth login` を実行すること |
+| 5 | 環境/API失敗、または台帳の `recovery_required` 行がチャンネルをブロックしている |
+| 6 | 1件以上の動画が失敗（例: `privacy_lock`） |
+
+複数該当する場合の優先順位: `2 > 4 > 5 > 6 > 3 > 0`。
+
+## 無人運用（launchd）
+
 ```bash
-# 設定確認と動画検索
-bash sh/check_config.sh --range "2025/08/04 00:00:00" "2025/08/04 23:59:59"
+vodp launchd generate \
+  --venv-python /abs/path/to/.venv/bin/vodp \
+  --working-directory /abs/path/to/repo \
+  --out ~/Library/LaunchAgents/com.vodp.vods-upload.plist
+launchctl load ~/Library/LaunchAgents/com.vodp.vods-upload.plist
 ```
 
-### スケジュール実行（cron使用）
+シェルラッパーなし: `vodp` は launchd から直接起動される（旧 `sh/run_upload.sh` は `| tee` を経由しており、実際の終了コードを握り潰していた -- `docs/requirements.md` の G18 参照）。生成される plist に `KeepAlive` はなく（無人実行が失敗した際に即座に再起動しない）、`VODP_HOME`/`PATH` を明示的に設定する。
+
+## `insert` 応答喪失からの復旧（台帳 `recovery_required`）
+
+YouTube の `videos.insert` は冪等ではないため、vodp はこれを再試行・自動再実行しない。アップロードが YouTube に到達した*後*、vodp がその応答を記録する*前*にネットワークが切断された場合、台帳の行は `insert_inflight` のまま残る。次回実行時、vodp は何よりも先に自分のアップロード動画から隠しフッターマーカー（`[vodp:vod=<twitch_vod_id>]`、vodp が書くすべての説明文の末尾に付与される）を自動検索する：
+
+- **見つかった場合** -- その行は新規 insert 呼び出しなしで先へ進む（公開/プレイリスト等）。
+- **見つからない場合** -- その行は `recovery_required` へ遷移し、実行全体が exit 5 で終了する。手動で解決する：
+
+  ```bash
+  # 手動確認：アップロードは実際に行われたか？ YouTube Studio で VOD 名に似た
+  # 非公開動画を確認するか、説明文で上記のフッターマーカーを検索する。
+  vodp ledger recover --channel <channel_id>       # 未解決の全行を一覧表示
+  vodp ledger resolve --channel <channel_id> --vod <twitch_vod_id> --action reinsert --yes   # 未アップロードと確認 -> 最初からやり直し
+  vodp ledger resolve --channel <channel_id> --vod <twitch_vod_id> --action abandon  --yes   # アップロード済みと確認（または諦める）-> 追跡を停止
+  ```
+
+  行が既に `youtube_video_id` を保持しているか、insert 後の段階（uploaded・processing・playlist 等）から `recovery_required` に到達した場合、`reinsert` は拒否される -- その場合 `abandon` のみが提供される。動画の存在が確認されており、再 insert すると重複が生じるため。
+
+破損した台帳（例：クラッシュによる書き込み途中の切断）は、`vodp ledger repair --channel <channel_id>` を実行するまですべての書き込みをブロックする：元のファイルを隔離し、ファイル末尾が書き込み途中切断の一義的な兆候（末尾改行の欠落）である場合のみ最終行を自動的に破棄する。それ以外の場合は手動調査のためブロックされたままとなる。
+
+## 説明文へのプレイリストURL（M22）
+
+`--playlist NAME` は実行ごとに1回だけプレイリストを解決（または作成）し、どの動画の insert よりも先に行うため、そのURLは `{playlist_url}` を通じて各動画の説明文に焼き込める -- もしくはテンプレートがそれを参照していない場合、vodp が `プレイリスト: <url>` を最終行として自動的に追記する。再実行（または説明文に触れる `meta set`）は冪等であり、行は重複ではなく収束する。既に*異なる*プレイリスト行を持つ説明文はハードコンフリクト（exit 2）となり、黙って上書きされることはない。新規プレイリストの作成は、説明文が既に5000バイト上限に近く、不明な長さのプレイリストIDを安全に収容できない場合は拒否される（exit 2）-- その場合は既存プレイリストに `--playlist-id` を渡すか、手動で先に作成すること。`--dry-run` は `playlists.list` のみを呼び出し（作成は行わない）、見つかった場合は `playlist_url`、作成が必要な場合は `planned_playlist_title` を報告する。
+
+## 無人耐性（M15）
+
+`--deadline SECONDS`（既定 3600）が実行全体の時間予算を制限する。`SIGTERM`/`SIGINT` は段階的に処理される（1回目のシグナルで新規作業の受付を停止、2回目で進行中のI/Oを中断、3回目で強制終了）。それまでの内容はすべて台帳に確実に記録済み。冪等な読取（`videos.list`/`playlists.list`/`playlistItems.list`/`channels.list`/`videos.update`）は実行全体で1つの有限リトライ・バックオフ予算を共有する。非冪等な3つの書込（`videos.insert`/`playlists.insert`/`playlistItems.insert`）は構造上決して再試行されない（`num_retries=0`）-- `src/vodp/infra/retry.py` を参照。デッドラインは各VOD間、ffprobe ステップ（サブプロセスのタイムアウトを制限）、各再開可能アップロードチャンクの前、そしてダウンロード中の yt-dlp `progress_hooks` コールバックのたびにチェックされる（F6、Codex/tester レビュー第2ラウンド、差分項目のフォローアップ）-- yt-dlp 自身の `socket_timeout` オプションも残りデッドラインから設定されるため、進捗コールバックの合間であっても、停止した接続が永遠にハングすることはない。yt-dlp のダウンロードループへの完全な内部伝播は現実的ではないが、この2つの組み合わせでデッドラインを超えてハングしないことを保証するには十分。唯一の真にスコープ外のギャップは**対話的 OAuth 待機**（`vodp auth login` のブラウザフロー）であり、非対話/dry-run 実行ではこれを一切開かない（M6/M7）ため、これは手動で `auth login` を実行するオペレーターにのみ影響する。
+
+## 既知の制限（時間制約付きスコープ、フォローアップ対象）
+
+- 実 API/OAuth の end-to-end 検証、および `~/work/tools/twitch-vods-to-youtube/` への実際のリポジトリ移動はリーダーの責任（docs/design.md §11）-- 本リポジトリ内のすべては完全にオフラインでテストされる（`pytest -q`、`tests/conftest.py` が実ソケット接続をブロック）。
+- スタックしたプレイリスト作成のwrite-ahead行（`__playlist__:<name>`、`playlist_create_inflight`/`recovery_required`）は、*将来の*実行が候補VODを持ち、**かつ**同じプレイリストを再度要求した場合にのみ解消される -- 動画レベルの `recovery_required` 行のように範囲非依存で拾われるわけではない。`vodp ledger recover --channel ID` はスタックしている限りそれを一覧表示し続け、`vodp ledger resolve` もそれに対して機能し続ける。
+- `advance()` の `expected_stage` ガードは、遷移ごとに許可される具体的な直前段階を列挙するのではなく、行の*現在の*段階が一致することを受け入れる方式であるため、古い/順序違反の書き込みは検知できるが、理論上不正なものすべてを検知できるわけではない。
+
+## 開発
+
 ```bash
-# crontabを編集
-crontab -e
-
-# 毎日午前9時に実行する設定例
-0 9 * * * /path/to/twitch-vods-to-youtube/sh/run_upload.sh
+./.venv/bin/python -m pytest -q
 ```
 
-## ファイル構成
-
-```
-twitch-vods-to-youtube/
-├── app/                 # Pythonアプリケーションディレクトリ
-│   ├── main.py          # メインスクリプト
-│   ├── config.py        # 設定管理
-│   ├── twitch_api.py    # Twitch API処理
-│   ├── youtube_api.py   # YouTube API処理
-│   ├── video_downloader.py # 動画ダウンロード処理
-│   ├── upload_manager.py # アップロード管理
-│   └── check_config.py  # 設定確認ツール
-├── sh/                  # シェルスクリプトディレクトリ
-│   ├── run_upload.sh    # cron実行用シェルスクリプト
-│   └── check_config.sh  # 設定確認用シェルスクリプト
-├── env/                 # 環境設定ディレクトリ
-│   ├── .env.sample     # .envファイルのテンプレート
-│   └── .env            # API設定ファイル（要作成）
-├── requirements.txt     # 依存関係
-├── README.md           # このファイル
-
-├── config/            # 設定ファイルディレクトリ
-│   └── client_secret.json # YouTube API認証ファイル（要作成）
-├── pickle/            # 認証トークンディレクトリ
-│   └── token.pickle  # YouTube API認証トークン（自動作成）
-├── downloads/          # ダウンロードディレクトリ
-└── logs/               # 実行ログディレクトリ
-```
-
-## 設定項目
-
-| 項目 | 説明 | デフォルト値 |
-|------|------|-------------|
-| `TWITCH_CLIENT_ID` | Twitch API Client ID | - |
-| `TWITCH_CLIENT_SECRET` | Twitch API Client Secret | - |
-| `TWITCH_CHANNEL_NAME` | 対象チャンネル名 | - |
-| `TWITCH_CHANNEL_URL` | TwitchチャンネルURL（動画説明に含まれる） | `https://www.twitch.tv/{TWITCH_CHANNEL_NAME}` |
-| `AUTHOR_NAME` | 作者名（動画タグに含まれる） | - |
-| `DOWNLOAD_DIR` | ダウンロードディレクトリ | `./downloads` |
-| `MAX_VIDEO_LENGTH` | 最大動画長（秒） | `43200`（12時間） |
-
-## YouTubeの制限について
-
-### 動画の長さ制限
-- **認証済みアカウント**: 最大12時間（43,200秒）
-- **未認証アカウント**: 最大15分（900秒）
-
-### ファイルサイズ制限
-- **一般的なアカウント**: 128GB
-- **認証済みアカウント**: 256GB
-
-### 推奨設定
-- 認証済みアカウントの場合: `MAX_VIDEO_LENGTH=43200`（12時間）
-- 未認証アカウントの場合: `MAX_VIDEO_LENGTH=900`（15分）
-
-## 注意事項
-
-- 初回実行時にYouTube APIの認証が必要です
-- 認証時に複数のチャンネルがある場合は、アップロード先のチャンネルを選択してください
-- 動画の長さが`MAX_VIDEO_LENGTH`を超える場合はスキップされます
-- アップロード成功後、ローカルファイルは自動的に削除されます
-- 古いファイルは7日後に自動的に削除されます
-- cronで実行する場合は、絶対パスを使用してください
-- 実行ログは`logs/`ディレクトリに保存されます
-- 同じファイル名の動画が既に存在する場合はダウンロードをスキップします
-- 設定した作者名が動画タグに自動的に追加されます
-- 日時範囲指定時は、動画の作成日時でソートして正確な期間内の動画のみを処理します
-
-## APIキーの有効期限について
-
-### Twitch API
-- **アクセストークン**: 24時間で期限切れ
-- **自動更新**: 期限切れ時に自動的に再取得
-- **Client ID/Secret**: 永続的（変更時は手動更新が必要）
-
-### YouTube API
-- **アクセストークン**: 1時間で期限切れ
-- **リフレッシュトークン**: 永続的（手動で無効化するまで有効）
-- **自動更新**: 期限切れ時に自動的に更新
-- **認証エラー**: 自動的に再認証を試行
-
-### 推奨事項
-- 定期的にログを確認してAPIエラーがないかチェック
-- 長期間運用する場合は、APIキーの有効期限を定期的に確認
-- 認証エラーが頻発する場合は、手動で再認証を実行
-
-## トラブルシューティング
-
-### Twitch API認証エラー
-1. `.env`ファイルにClient IDとClient Secretが正しく設定されているか確認
-2. Twitch Developer Consoleでアプリケーションが正しく設定されているか確認
-
-### .envファイルエラー
-1. `.env`ファイルが存在するか確認
-2. `.env.example`を参考に`.env`ファイルを作成
-3. すべての必要な設定値が入力されているか確認
-4. `./check_config.sh`で詳細な設定確認を実行
-
-### 動画ダウンロードエラー
-1. yt-dlpが正しくインストールされているか確認
-2. インターネット接続を確認
-3. 同じファイル名の動画が既に存在する場合はスキップされます
-
-### YouTube認証エラー
-1. `client_secret.json`ファイルが正しく配置されているか確認
-2. 初回実行時にブラウザで認証を完了する
-3. 複数のチャンネルがある場合は、アップロード先のチャンネルを選択する
-4. 認証エラーが続く場合は、`token.pickle`を削除して再認証する
-
-### 日時範囲指定で動画が見つからない場合
-1. `check_config.sh`で指定期間の動画が正しく検索されるか確認
-2. Twitch APIの制限により、古い動画は取得できない場合があります
-3. 日時範囲が正しく指定されているか確認（JST形式）
-4. チャンネル名が正しく設定されているか確認
-
-## 免責事項
-
-**重要**: このコードはAI生成で作成されています。何かしら問題が発生した場合でも、作者は責任を負いかねます。
-
-- このソフトウェアは「現状のまま」提供され、明示的または暗黙的な保証は一切ありません
-- 作者は、このソフトウェアの使用または使用不能によって生じるいかなる損害についても責任を負いません
-- このソフトウェアを使用する前に、必ずバックアップを取得し、テスト環境で十分に検証してください
-- 本ソフトウェアの使用は、ユーザーの自己責任で行ってください
-
-## ライセンス
-
-MIT License
+すべてのテストは完全にオフライン（Twitch/YouTube/yt-dlp/ffprobe はフェイク化 -- `tests/fakes.py` と `docs/design.md` §10 参照）。`tests/conftest.py` が実ソケット接続を保険としてブロックする。唯一の例外は `tests/test_packaging.py`（M21/R6）: このリポジトリを、実インタプリタ自身の setuptools/wheel（dev 依存）を使って（PyPI ではなく）、実際の非editableな `pip install --no-build-isolation --no-deps` で使い捨ての `--prefix` へインストールする -- これによりオフラインのまま、`src/vodp/profiles/*.toml` が editable インストールのチェックアウトへの参照によってたまたま動いているのではなく、実際にインストール済みパッケージデータとして出荷されていることを確認する。

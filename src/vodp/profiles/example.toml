@@ -1,0 +1,32 @@
+# vodp profile template (M9/M21改). Copy to <VODP_HOME>/profiles/<name>.toml
+# and fill in channel-specific values. Nothing channel-specific belongs in
+# src/vodp -- that is the whole point of this file.
+#
+# Placeholders usable in [meta] templates: {date} {vod_url} {title} {playlist_url}
+
+[meta]
+title_template = "{title}"
+description_template = """
+{title}
+
+配信日（JST）: {date}
+配信アーカイブ: {vod_url}
+"""
+tags = ["Twitch", "配信アーカイブ"]
+category_id = "22"
+
+[playlist]
+name = "配信アーカイブ"
+privacy = "public"
+
+[limits]
+# Videos from Twitch archives created before this date (JST, YYYY-MM-DD)
+# are never reserved, to avoid re-uploading anything already published by
+# the legacy tool before migrating to vodp (requirements.md §追補 M21改, §11).
+earliest_date = "2026-07-27"
+
+[channel]
+# Optional (S7): expected YouTube channel id, checked at whoami/preflight
+# time so a wrong OAuth account fails fast instead of uploading to the
+# wrong channel.
+# expected_channel_id = "UCXXXXXXXXXXXXXXXXXXXXXX"

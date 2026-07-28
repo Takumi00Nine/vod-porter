@@ -205,7 +205,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Twitch VOD to YouTube specific
+# Twitch VOD to YouTube specific (legacy app/ paths, kept for legacy/ fallback)
 downloads/
 *.mp4
 *.mkv
@@ -213,3 +213,13 @@ downloads/
 pickle/token.pickle
 config/client_secret.json
 env/.env
+
+# vodp: in case VODP_HOME is ever pointed inside the repo (it defaults to
+# ~/.vodp, outside the repo, but guard against an accidental --home . /
+# VODP_HOME=. during local dev) -- these are runtime state, never code.
+/auth/
+/ledger/
+/run/
+/.vodp/
+
+pickle/token.pickle.migrated

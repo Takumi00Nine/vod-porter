@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "vodp videos publish JSON contract (M8)",
+  "type": "object",
+  "required": [
+    "run",
+    "videos",
+    "summary"
+  ],
+  "properties": {
+    "run": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "command",
+        "started_at",
+        "dry_run"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "videos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "twitch_vod_id",
+          "status"
+        ],
+        "properties": {
+          "twitch_vod_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "uploaded",
+              "skipped",
+              "failed"
+            ]
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "youtube_video_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "total",
+        "uploaded",
+        "skipped",
+        "failed"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer"
+        },
+        "uploaded": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
