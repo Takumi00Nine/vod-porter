@@ -1,4 +1,4 @@
-"""``vodp playlist list|create|add|delete|remove-item`` (M12, M1改)."""
+"""``vodp playlist list|create|add|update|delete|remove-item`` (M12, M1改)."""
 
 from __future__ import annotations
 
@@ -88,6 +88,45 @@ def run_add(args, ctx):
     envelope = jsonout.build_envelope(run=ctx.run_header(), videos=[{
         "twitch_vod_id": None, "status": "uploaded", "reason_code": None,
         "youtube_video_id": args.video_id, "playlist_id": playlist_id,
+    }])
+    return exitcodes.OK, envelope
+
+
+def run_update(args, ctx):
+    if args.new_title is None and args.description is None:
+        # Cross-field validation argparse itself can't express (mutually
+        # exclusive groups only cover "at most one", not "at least one") --
+        # same pattern as meta.py's run_set --privacy rejection: an
+        # ArgError here maps to exit 2/no-JSON exactly like an
+        # argparse.error() would (M4, core/errors.py).
+        raise ArgError("`playlist update` requires --new-title and/or --description")
+
+    if args.dry_run:
+        envelope = jsonout.build_envelope(run=ctx.run_header(), videos=[{
+            "twitch_vod_id": None, "status": "skipped", "reason_code": reasons.DRY_RUN,
+            "title": args.name, "new_title": args.new_title, "description": args.description,
+        }])
+        return exitcodes.OK, envelope
+
+    youtube = _client(ctx, args)
+    _verify_channel_if_configured(ctx, args, youtube)
+    playlist = yt_infra.find_playlist_by_name(youtube, args.name)
+    if playlist is None:
+        # Same "refuse rather than guess/auto-create" posture as playlist
+        # delete's misdeletion guard -- `playlist update` only ever
+        # targets an existing playlist (unlike `playlist add`, which may
+        # create one).
+        raise ApiError(f"playlist named {args.name!r} not found (playlists.list, mine=True); refusing to update")
+    playlist_id = playlist["id"]
+
+    updated = yt_infra.update_playlist_snippet(
+        youtube, playlist_id, title=args.new_title, description=args.description,
+    )
+    updated_snippet = updated["snippet"]
+    envelope = jsonout.build_envelope(run=ctx.run_header(), videos=[{
+        "twitch_vod_id": None, "status": "uploaded", "reason_code": None,
+        "playlist_id": playlist_id, "title": updated_snippet.get("title"),
+        "description": updated_snippet.get("description"),
     }])
     return exitcodes.OK, envelope
 

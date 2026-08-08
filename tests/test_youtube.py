@@ -162,6 +162,45 @@ def test_update_snippet_missing_video_raises_api_error():
         yt.update_snippet(fake, "missing", title="x")
 
 
+# -- channel update: merge -> update, title never overridable ----------------
+
+def test_update_channel_branding_preserves_unspecified_fields_and_current_title():
+    fake = FakeYouTube()
+    fake.queue("channels", "list", {"items": [{"brandingSettings": {
+        "channel": {"title": "My Channel", "description": "old", "keywords": "a b"},
+        "hints": [{"property": "x", "value": "y"}],
+    }}]})
+    fake.queue("channels", "update", {"id": "UCabc"})
+    yt.update_channel_branding(fake, "UCabc", description="new")
+    update_call = [c for c in fake.calls if c["resource"] == "channels" and c["method"] == "update"][0]
+    body = update_call["kwargs"]["body"]
+    assert body["id"] == "UCabc"
+    branding = body["brandingSettings"]
+    assert branding["channel"]["title"] == "My Channel"  # re-sent unchanged, never overridable
+    assert branding["channel"]["description"] == "new"
+    assert branding["channel"]["keywords"] == "a b"  # untouched field preserved
+    assert branding["hints"] == [{"property": "x", "value": "y"}]  # untouched sub-object preserved
+
+
+def test_update_channel_branding_missing_title_raises_api_error_fail_closed():
+    fake = FakeYouTube()
+    fake.queue("channels", "list", {"items": [{"brandingSettings": {"channel": {"description": "old"}}}]})
+    with pytest.raises(ApiError):
+        yt.update_channel_branding(fake, "UCabc", description="new")
+    assert not any(c["method"] == "update" for c in fake.calls)
+
+
+def test_update_channel_branding_null_channel_object_raises_api_error_not_attribute_error():
+    """Codex light review follow-up: an explicit ``channel: null`` in a
+    malformed API response must fail the same ApiError path, not raise
+    an unrelated AttributeError from chaining .get() onto None."""
+    fake = FakeYouTube()
+    fake.queue("channels", "list", {"items": [{"brandingSettings": {"channel": None}}]})
+    with pytest.raises(ApiError):
+        yt.update_channel_branding(fake, "UCabc", description="new")
+    assert not any(c["method"] == "update" for c in fake.calls)
+
+
 # -- M15: retry_budget wiring (idempotent GET/update only) -------------------
 
 def test_get_video_status_retries_with_budget_on_5xx(monkeypatch):

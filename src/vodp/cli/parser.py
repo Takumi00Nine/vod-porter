@@ -155,6 +155,17 @@ def build_parser() -> argparse.ArgumentParser:
     playlist_add.add_argument("--name", required=True)
     playlist_add.add_argument("--video-id", required=True)
 
+    playlist_update = playlist_sub.add_parser(
+        "update", help="update a playlist's title/description (merge-update, part=snippet)",
+    )
+    _add_common(playlist_update)
+    _add_dry_run(playlist_update)
+    playlist_update.add_argument("--name", required=True, help="current playlist title to resolve")
+    playlist_update.add_argument("--new-title", help="new playlist title")
+    playlist_update.add_argument(
+        "--description", help="new playlist description (raw text, not a file path -- see meta set's --description-file for that)",
+    )
+
     playlist_delete = playlist_sub.add_parser("delete", help="delete a playlist (default dry-run)")
     _add_common(playlist_delete)
     _add_dry_run(playlist_delete)
@@ -167,6 +178,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_delete_guard(playlist_remove_item)
     playlist_remove_item.add_argument("--playlist-id", required=True)
     playlist_remove_item.add_argument("--video-id", required=True)
+
+    # --- channel --------------------------------------------------------
+    channel = command_sub.add_parser("channel", help="YouTube channel metadata operations")
+    channel_sub = channel.add_subparsers(dest="subcommand", required=True)
+
+    channel_show = channel_sub.add_parser(
+        "show", help="show the authenticated channel's title/description/customUrl (read-only, detailed whoami)",
+    )
+    _add_common(channel_show)
+
+    # NOTE: no --title here -- channels.update rejects any actual title
+    # change (channelTitleUpdateForbidden; renaming a channel is only
+    # possible in YouTube Studio, not through this API at all), confirmed
+    # against https://developers.google.com/youtube/v3/docs/channels/update.
+    channel_update = channel_sub.add_parser(
+        "update", help="update the channel description (merge-update, part=brandingSettings)",
+    )
+    _add_common(channel_update)
+    _add_dry_run(channel_update)
+    channel_update.add_argument("--description", required=True, help="new channel description")
 
     # --- cache --------------------------------------------------------
     cache = command_sub.add_parser("cache", help="local cache maintenance")

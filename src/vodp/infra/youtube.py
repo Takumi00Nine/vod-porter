@@ -233,6 +233,21 @@ def get_own_channel_snippet(youtube, *, retry_budget: RetryBudget | None = None,
     return items[0]
 
 
+def get_own_channel_detail(youtube, *, retry_budget: RetryBudget | None = None, deadline=None) -> dict:
+    """``channel show``'s read-only need: id + snippet (title/description/
+    customUrl) + brandingSettings in one call -- a superset of
+    ``get_own_channel_snippet()`` (whoami keeps using the cheaper
+    part=snippet-only call; this one exists for the detailed view)."""
+    resp = _execute(
+        youtube.channels().list(part="snippet,brandingSettings", mine=True),
+        retry_budget=retry_budget, deadline=deadline,
+    )
+    items = resp.get("items", [])
+    if not items:
+        raise ApiError("no channel found for the authenticated account (channels.list mine=true)")
+    return items[0]
+
+
 def get_uploads_playlist_id(youtube, *, retry_budget: RetryBudget | None = None, deadline=None) -> str:
     resp = _execute(
         youtube.channels().list(part="contentDetails", mine=True), retry_budget=retry_budget, deadline=deadline,
@@ -326,6 +341,131 @@ def delete_playlist(youtube, playlist_id: str) -> None:
 
 def remove_playlist_item(youtube, playlist_item_id: str) -> None:
     _execute_once(youtube.playlistItems().delete(id=playlist_item_id))
+
+
+# -- playlist update (``vodp playlist update``: read -> merge -> update, ----
+# never drops title/description the caller didn't touch, mirrors update_snippet
+# below for videos)
+
+def get_playlist_snippet(youtube, playlist_id: str, *, retry_budget: RetryBudget | None = None, deadline=None) -> dict:
+    resp = _execute(
+        youtube.playlists().list(part="snippet", id=playlist_id), retry_budget=retry_budget, deadline=deadline,
+    )
+    items = resp.get("items", [])
+    if not items:
+        raise ApiError(f"playlist {playlist_id} not found (snippet)")
+    return items[0]["snippet"]
+
+
+def merge_playlist_snippet(current: dict, *, title=None, description=None) -> dict:
+    merged = dict(current)
+    if title is not None:
+        merged["title"] = title
+    if description is not None:
+        merged["description"] = description
+    return merged
+
+
+def update_playlist_snippet(
+    youtube, playlist_id: str, *, current_snippet: dict | None = None,
+    retry_budget: RetryBudget | None = None, deadline=None, **overrides
+) -> dict:
+    """``current_snippet``: pass in an already-fetched snippet to avoid a
+    redundant second ``playlists.list`` call (same rationale as
+    ``update_snippet`` below for videos)."""
+    current = current_snippet if current_snippet is not None else get_playlist_snippet(
+        youtube, playlist_id, retry_budget=retry_budget, deadline=deadline,
+    )
+    merged = merge_playlist_snippet(current, **overrides)
+    # title is a required API field on part=snippet -- always re-send it
+    # even when this call only touches description (罠4: playlists.update
+    # replaces the whole snippet part, not just the given fields;
+    # Knowledge/youtube-api-pitfalls.md). status is never touched here
+    # (part=snippet only).
+    merged.setdefault("title", current.get("title"))
+    # playlists.update is idempotent -- retry allowed.
+    return _execute(
+        youtube.playlists().update(part="snippet", body={"id": playlist_id, "snippet": merged}),
+        retry_budget=retry_budget, deadline=deadline,
+    )
+
+
+# -- channel update (``vodp channel update``: read -> merge -> update, ------
+# same merge-update shape as playlist update above, but channels.update
+# only accepts part=brandingSettings (never part=snippet -- snippet.title/
+# description are read-only to API consumers; confirmed against
+# https://developers.google.com/youtube/v3/docs/channels/update). Title is
+# deliberately *not* an accepted override anywhere in this module (see
+# update_channel_branding's docstring) -- channels.update rejects any
+# actual title change outright.
+
+def get_own_channel_branding(youtube, *, retry_budget: RetryBudget | None = None, deadline=None) -> dict:
+    resp = _execute(
+        youtube.channels().list(part="brandingSettings", mine=True), retry_budget=retry_budget, deadline=deadline,
+    )
+    items = resp.get("items", [])
+    if not items:
+        raise ApiError("no channel found for the authenticated account (channels.list mine=true)")
+    return items[0].get("brandingSettings", {})
+
+
+def merge_channel_branding(current: dict, *, description: str) -> dict:
+    """``current``: the whole ``brandingSettings`` object (not just its
+    ``channel`` sub-object) -- copied through as-is so any other
+    sub-object the API still returns (e.g. legacy ``hints``) survives
+    the round trip untouched, same "never drop what the caller didn't
+    touch" rule as ``merge_playlist_snippet``/``merge_snippet``.
+
+    ``description`` is the only mutable field this function (or its only
+    caller, ``update_channel_branding``) ever accepts -- deliberately no
+    ``title`` parameter at all: ``channels.update`` rejects any actual
+    title change (``channelTitleUpdateForbidden``), so there is no safe
+    way to expose one here. ``update_channel_branding`` re-sends the
+    channel's current title unconditionally (not via a caller-suppliable
+    override), so this can never be bypassed by a future call site
+    accidentally passing a differing title through."""
+    merged = dict(current)
+    channel = dict(merged.get("channel", {}))
+    channel["description"] = description
+    merged["channel"] = channel
+    return merged
+
+
+def update_channel_branding(
+    youtube, channel_id: str, *, description: str, current_branding: dict | None = None,
+    retry_budget: RetryBudget | None = None, deadline=None,
+) -> dict:
+    """``current_branding``: pass in an already-fetched ``brandingSettings``
+    object to avoid a redundant second ``channels.list`` call (same
+    rationale as ``update_playlist_snippet``/``update_snippet``).
+
+    ``brandingSettings.channel.title`` must equal the channel's *current*
+    title (or be omitted) -- the API rejects any actual change with
+    ``channelTitleUpdateForbidden`` (renaming a channel is only possible
+    via YouTube Studio, not this API). This function always re-sends the
+    current, unchanged title read back from ``current_branding`` -- there
+    is no parameter that can override it -- and refuses (fail-closed,
+    never silently sends a null title) if the readback didn't even have
+    one, rather than ever risking a title change slipping through."""
+    current = current_branding if current_branding is not None else get_own_channel_branding(
+        youtube, retry_budget=retry_budget, deadline=deadline,
+    )
+    # ``or {}`` (not just ``.get(..., {})``): an explicit ``channel: null``
+    # in a malformed/unexpected API response must fail the same ApiError
+    # path below, not raise an unrelated AttributeError from chaining
+    # .get() onto None (Codex light review follow-up).
+    current_title = (current.get("channel") or {}).get("title")
+    if not current_title:
+        raise ApiError(
+            "channels.list (part=brandingSettings) returned no current channel.title to preserve; refusing to update"
+        )
+    merged = merge_channel_branding(current, description=description)
+    merged["channel"]["title"] = current_title
+    # channels.update is idempotent -- retry allowed.
+    return _execute(
+        youtube.channels().update(part="brandingSettings", body={"id": channel_id, "brandingSettings": merged}),
+        retry_budget=retry_budget, deadline=deadline,
+    )
 
 
 def delete_video(youtube, video_id: str) -> None:

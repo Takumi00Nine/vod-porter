@@ -106,6 +106,174 @@ def _seed_expected_channel_profile(home, expected_channel_id):
     )
 
 
+# -- channel show --------------------------------------------------------
+
+def test_channel_show(vodp_home, fake_youtube, capsys):
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("channels", "list", {"items": [{
+        "id": "UCabc",
+        "snippet": {"title": "My Channel", "description": "channel desc", "customUrl": "@mychannel"},
+        "brandingSettings": {"channel": {"title": "My Channel", "description": "channel desc"}},
+    }]})
+    code, out = _run(["channel", "show", "--home", str(vodp_home), "--non-interactive"], capsys)
+    assert code == exitcodes.OK
+    assert out["videos"][0]["youtube_channel_id"] == "UCabc"
+    assert out["videos"][0]["title"] == "My Channel"
+    assert out["videos"][0]["description"] == "channel desc"
+    assert out["videos"][0]["custom_url"] == "@mychannel"
+    call = fake_youtube.calls[0]
+    assert call["kwargs"]["part"] == "snippet,brandingSettings"
+    assert call["kwargs"]["mine"] is True
+    _validate("channel_show", out)
+
+
+def test_channel_show_401_during_use_exits_4_not_unhandled_exception(vodp_home, fake_youtube, capsys):
+    """Same F2 regression coverage as whoami's: routed through
+    infra/youtube.py's _execute() (via get_own_channel_detail), so a 401
+    surfaces as AuthRequiredError(4), not an unconverted HttpError."""
+    from googleapiclient.errors import HttpError
+
+    _seed_valid_token(vodp_home)
+    http_error = HttpError(resp=type("R", (), {"status": 401, "reason": "Unauthorized"})(), content=b"invalid_grant")
+    fake_youtube.queue("channels", "list", http_error)
+    code, out = _run(["channel", "show", "--home", str(vodp_home), "--non-interactive"], capsys)
+    assert code == exitcodes.AUTH_REQUIRED
+
+
+# -- channel update -------------------------------------------------------
+
+def test_channel_update_dry_run_makes_no_api_calls(vodp_home, fake_youtube, capsys):
+    code, out = _run(
+        ["channel", "update", "--home", str(vodp_home), "--dry-run", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.OK
+    assert out["videos"][0]["status"] == "skipped"
+    assert out["videos"][0]["reason_code"] == "dry_run"
+    assert not fake_youtube.calls
+    _validate("channel_update", out)
+
+
+def test_channel_update_success_preserves_current_title_and_other_branding_fields(vodp_home, fake_youtube, capsys):
+    """罠6 regression: channels.update replaces the whole brandingSettings
+    part -- a description-only change must still re-send the current
+    (unchanged) title (channelTitleUpdateForbidden otherwise) and must
+    not drop other untouched brandingSettings.channel fields (keywords
+    here) or unrelated top-level brandingSettings sub-objects."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("channels", "list", {"items": [{"id": "UCabc"}]})  # get_own_channel_id
+    fake_youtube.queue("channels", "list", {"items": [{"brandingSettings": {
+        "channel": {"title": "My Channel", "description": "old desc", "keywords": "vods archive"},
+        "hints": [{"property": "some:legacy", "value": "x"}],
+    }}]})  # get_own_channel_branding
+    fake_youtube.queue("channels", "update", {"brandingSettings": {
+        "channel": {"title": "My Channel", "description": "new desc", "keywords": "vods archive"},
+        "hints": [{"property": "some:legacy", "value": "x"}],
+    }})
+    code, out = _run(
+        ["channel", "update", "--home", str(vodp_home), "--non-interactive", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.OK
+    assert [(c["resource"], c["method"]) for c in fake_youtube.calls] == [
+        ("channels", "list"), ("channels", "list"), ("channels", "update"),
+    ]
+    branding_read_call, update_call = fake_youtube.calls[1], fake_youtube.calls[2]
+    assert branding_read_call["kwargs"]["part"] == "brandingSettings"
+    assert branding_read_call["kwargs"]["mine"] is True
+    assert update_call["kwargs"]["part"] == "brandingSettings"
+    body = update_call["kwargs"]["body"]
+    assert body["id"] == "UCabc"
+    assert body["brandingSettings"]["channel"]["title"] == "My Channel"  # unchanged, always re-sent
+    assert body["brandingSettings"]["channel"]["description"] == "new desc"
+    assert body["brandingSettings"]["channel"]["keywords"] == "vods archive"  # untouched field preserved
+    assert body["brandingSettings"]["hints"] == [{"property": "some:legacy", "value": "x"}]  # untouched sub-object
+    assert out["videos"][0]["youtube_channel_id"] == "UCabc"
+    assert out["videos"][0]["description"] == "new desc"
+    _validate("channel_update", out)
+
+
+def test_channel_update_missing_current_title_refuses_fail_closed(vodp_home, fake_youtube, capsys):
+    """update_channel_branding() must never send a null/absent title just
+    because the brandingSettings readback happened not to have one --
+    fail closed (ApiError/exit 5) instead of risking
+    channelTitleUpdateForbidden or an accidental title wipe."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("channels", "list", {"items": [{"id": "UCabc"}]})  # get_own_channel_id
+    fake_youtube.queue("channels", "list", {"items": [{"brandingSettings": {"channel": {"description": "old"}}}]})
+    fake_youtube.queue("channels", "update", {"brandingSettings": {"channel": {"description": "new desc"}}})
+    code, out = _run(
+        ["channel", "update", "--home", str(vodp_home), "--non-interactive", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.ENV_OR_API_ERROR
+    assert not any(c["method"] == "update" for c in fake_youtube.calls)
+
+
+def test_channel_update_requires_description_exits_2():
+    """``--description`` is a required argparse flag -- omitting it is a
+    plain argparse usage error (exit 2, no JSON) raised by argparse
+    itself before any business logic runs, same as e.g. `ledger resolve`
+    without `--yes` (test_cli_ledger.py's identical pattern)."""
+    from vodp.cli.parser import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["channel", "update", "--non-interactive"])
+    assert exc_info.value.code == exitcodes.ARG_ERROR
+
+
+def test_channel_update_expected_channel_id_match_makes_no_extra_calls(vodp_home, fake_youtube, capsys):
+    """When the profile's expected_channel_id *matches* the authenticated
+    channel, the guard must be a true no-op -- no extra channels.list
+    call beyond the single get_own_channel_id() this command needs
+    anyway (see _verify_expected_channel_id's docstring)."""
+    _seed_valid_token(vodp_home)
+    _seed_expected_channel_profile(vodp_home, "UCabc")
+    fake_youtube.queue("channels", "list", {"items": [{"id": "UCabc"}]})  # get_own_channel_id (also the F5 guard)
+    fake_youtube.queue(
+        "channels", "list",
+        {"items": [{"brandingSettings": {"channel": {"title": "My Channel", "description": "old desc"}}}]},
+    )
+    fake_youtube.queue(
+        "channels", "update",
+        {"brandingSettings": {"channel": {"title": "My Channel", "description": "new desc"}}},
+    )
+    code, out = _run(
+        ["channel", "update", "--home", str(vodp_home), "--non-interactive", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.OK
+    assert [(c["resource"], c["method"]) for c in fake_youtube.calls] == [
+        ("channels", "list"), ("channels", "list"), ("channels", "update"),
+    ]
+    _validate("channel_update", out)
+
+
+def test_channel_update_expected_channel_id_mismatch_exits_5(vodp_home, fake_youtube, capsys):
+    """F5: same guard as the other write-type commands, for channel
+    update specifically. ``channel update`` reuses its own
+    ``get_own_channel_id()`` result for this guard (see
+    ``_verify_expected_channel_id``'s docstring) instead of a second
+    call, so only one ``channels.list`` is queued for it here.
+
+    Mutation-tested: also queues the happy path's remaining responses,
+    so removing the guard would make this genuinely succeed instead of
+    coincidentally erroring on a missing fake response."""
+    _seed_valid_token(vodp_home)
+    _seed_expected_channel_profile(vodp_home, "UC_EXPECTED_NOT_ACTUAL")
+    fake_youtube.queue("channels", "list", {"items": [{"id": "UCabc"}]})  # get_own_channel_id (also the F5 guard)
+    fake_youtube.queue(
+        "channels", "list",
+        {"items": [{"brandingSettings": {"channel": {"title": "My Channel", "description": "old desc"}}}]},
+    )
+    fake_youtube.queue(
+        "channels", "update",
+        {"brandingSettings": {"channel": {"title": "My Channel", "description": "new desc"}}},
+    )
+    code, out = _run(
+        ["channel", "update", "--home", str(vodp_home), "--non-interactive", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.ENV_OR_API_ERROR
+    assert not any(c["method"] == "update" for c in fake_youtube.calls)
+
+
 # -- videos list/publish/delete ----------------------------------------------
 
 def test_videos_list(vodp_home, fake_youtube, capsys):
@@ -670,6 +838,212 @@ def test_playlist_add_expected_channel_id_mismatch_exits_5(vodp_home, fake_youtu
     )
     assert code == exitcodes.ENV_OR_API_ERROR
     assert not any(c["method"] == "insert" for c in fake_youtube.calls)
+
+
+# -- playlist update -----------------------------------------------------------
+
+def test_playlist_update_requires_new_title_or_description_exits_2(vodp_home, fake_youtube, capsys):
+    """Cross-field validation argparse itself can't express (M4: exit 2,
+    no JSON, regardless of whether argparse or a handler caught it)."""
+    _seed_valid_token(vodp_home)
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive", "--name", "Archive"], capsys,
+    )
+    assert code == exitcodes.ARG_ERROR
+    assert out is None
+    assert not fake_youtube.calls
+
+
+def test_playlist_update_dry_run_makes_no_api_calls(vodp_home, fake_youtube, capsys):
+    """M7: --dry-run must not touch the network at all (same posture as
+    playlist create/add's dry-run, not playlist delete's read-then-skip)."""
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--dry-run",
+         "--name", "Archive", "--new-title", "New Title"], capsys,
+    )
+    assert code == exitcodes.OK
+    assert out["videos"][0]["status"] == "skipped"
+    assert out["videos"][0]["reason_code"] == "dry_run"
+    assert not fake_youtube.calls
+    _validate("playlist_update", out)
+
+
+def test_playlist_update_not_found_exits_5_and_never_calls_update(vodp_home, fake_youtube, capsys):
+    """`playlist update` only ever targets an existing playlist (unlike
+    `playlist add`, which may auto-create) -- a name that doesn't resolve
+    must refuse, same posture as playlist delete's misdeletion guard."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("playlists", "list", {"items": [{"id": "PL_OTHER", "snippet": {"title": "Unrelated"}}]})
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--new-title", "New Title"], capsys,
+    )
+    assert code == exitcodes.ENV_OR_API_ERROR
+    assert not any(c["method"] == "update" for c in fake_youtube.calls)
+
+
+def test_playlist_update_ambiguous_name_exits_5(vodp_home, fake_youtube, capsys):
+    """find_playlist_by_name() itself refuses to guess among 2+ same-named
+    playlists -- reused as-is (same as playlist add's resolve step)."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("playlists", "list", {"items": [
+        {"id": "PL1", "snippet": {"title": "Archive"}},
+        {"id": "PL2", "snippet": {"title": "Archive"}},
+    ]})
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--new-title", "New Title"], capsys,
+    )
+    assert code == exitcodes.ENV_OR_API_ERROR
+    assert not any(c["method"] == "update" for c in fake_youtube.calls)
+
+
+def test_playlist_update_title_only_preserves_existing_description(vodp_home, fake_youtube, capsys):
+    """罠4 regression: playlists.update replaces the whole snippet part --
+    changing only --new-title must still re-send the untouched
+    description read back from playlists.list, never dropping it."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("playlists", "list", {"items": [{"id": "PL1", "snippet": {"title": "Archive"}}]})
+    fake_youtube.queue(
+        "playlists", "list",
+        {"items": [{"id": "PL1", "snippet": {"title": "Archive", "description": "old desc"}}]},
+    )
+    fake_youtube.queue(
+        "playlists", "update",
+        {"id": "PL1", "snippet": {"title": "New Title", "description": "old desc"}},
+    )
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--new-title", "New Title"], capsys,
+    )
+    assert code == exitcodes.OK
+    # Exact call sequence (not just "an update call exists somewhere"):
+    # find_playlist_by_name's mine=True listing, then the id-scoped
+    # snippet readback, then exactly one update -- no residual-read
+    # verification loop after (Knowledge/youtube-api-pitfalls.md 罠5:
+    # a post-update playlists.list can return a stale snippet, so this
+    # implementation deliberately trusts update()'s own response instead
+    # of reading back again).
+    assert [(c["resource"], c["method"]) for c in fake_youtube.calls] == [
+        ("playlists", "list"), ("playlists", "list"), ("playlists", "update"),
+    ]
+    update_call = fake_youtube.calls[2]
+    body = update_call["kwargs"]["body"]
+    assert body["snippet"]["title"] == "New Title"
+    assert body["snippet"]["description"] == "old desc"
+    assert out["videos"][0]["playlist_id"] == "PL1"
+    assert out["videos"][0]["title"] == "New Title"
+    assert out["videos"][0]["description"] == "old desc"
+    _validate("playlist_update", out)
+
+
+def test_playlist_update_description_only_re_sends_existing_title(vodp_home, fake_youtube, capsys):
+    """罠4 regression, the other direction: --description alone must
+    still carry the existing title in the update body (title is a
+    required API field on part=snippet)."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("playlists", "list", {"items": [{"id": "PL1", "snippet": {"title": "Archive"}}]})
+    fake_youtube.queue(
+        "playlists", "list",
+        {"items": [{"id": "PL1", "snippet": {"title": "Archive", "description": "old desc"}}]},
+    )
+    fake_youtube.queue(
+        "playlists", "update",
+        {"id": "PL1", "snippet": {"title": "Archive", "description": "new desc"}},
+    )
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.OK
+    assert [(c["resource"], c["method"]) for c in fake_youtube.calls] == [
+        ("playlists", "list"), ("playlists", "list"), ("playlists", "update"),
+    ]
+    update_call = fake_youtube.calls[2]
+    body = update_call["kwargs"]["body"]
+    assert body["snippet"]["title"] == "Archive"
+    assert body["snippet"]["description"] == "new desc"
+    _validate("playlist_update", out)
+
+
+def test_playlist_update_both_fields_together(vodp_home, fake_youtube, capsys):
+    """--new-title and --description are independent, not mutually
+    exclusive -- both may be given in the same call."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("playlists", "list", {"items": [{"id": "PL1", "snippet": {"title": "Archive"}}]})
+    fake_youtube.queue(
+        "playlists", "list",
+        {"items": [{"id": "PL1", "snippet": {"title": "Archive", "description": "old desc"}}]},
+    )
+    fake_youtube.queue(
+        "playlists", "update",
+        {"id": "PL1", "snippet": {"title": "New Title", "description": "new desc"}},
+    )
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--new-title", "New Title", "--description", "new desc"], capsys,
+    )
+    assert code == exitcodes.OK
+    update_call = next(c for c in fake_youtube.calls if c["resource"] == "playlists" and c["method"] == "update")
+    body = update_call["kwargs"]["body"]
+    assert body["snippet"]["title"] == "New Title"
+    assert body["snippet"]["description"] == "new desc"
+    _validate("playlist_update", out)
+
+
+def test_playlist_update_empty_string_description_clears_it(vodp_home, fake_youtube, capsys):
+    """An explicit empty string is a real (falsy but not None) value --
+    merge_playlist_snippet() must apply it, not treat it as "untouched"
+    (that distinction is exactly why the merge checks ``is not None``,
+    not plain truthiness)."""
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("playlists", "list", {"items": [{"id": "PL1", "snippet": {"title": "Archive"}}]})
+    fake_youtube.queue(
+        "playlists", "list",
+        {"items": [{"id": "PL1", "snippet": {"title": "Archive", "description": "old desc"}}]},
+    )
+    fake_youtube.queue(
+        "playlists", "update",
+        {"id": "PL1", "snippet": {"title": "Archive", "description": ""}},
+    )
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--description", ""], capsys,
+    )
+    assert code == exitcodes.OK
+    update_call = next(c for c in fake_youtube.calls if c["resource"] == "playlists" and c["method"] == "update")
+    body = update_call["kwargs"]["body"]
+    assert body["snippet"]["title"] == "Archive"
+    assert body["snippet"]["description"] == ""
+    _validate("playlist_update", out)
+
+
+def test_playlist_update_expected_channel_id_mismatch_exits_5(vodp_home, fake_youtube, capsys):
+    """F5: same guard as the other playlist write commands, for playlist
+    update specifically.
+
+    Mutation-tested: also queues the happy path's responses (same as
+    test_playlist_update_title_only_preserves_existing_description), so
+    removing the guard would make this genuinely succeed instead of
+    coincidentally erroring on a missing fake response."""
+    _seed_valid_token(vodp_home)
+    _seed_expected_channel_profile(vodp_home, "UC_EXPECTED_NOT_ACTUAL")
+    fake_youtube.queue("channels", "list", {"items": [{"id": "UCabc"}]})
+    fake_youtube.queue("playlists", "list", {"items": [{"id": "PL1", "snippet": {"title": "Archive"}}]})
+    fake_youtube.queue(
+        "playlists", "list",
+        {"items": [{"id": "PL1", "snippet": {"title": "Archive", "description": "old desc"}}]},
+    )
+    fake_youtube.queue(
+        "playlists", "update",
+        {"id": "PL1", "snippet": {"title": "New Title", "description": "old desc"}},
+    )
+    code, out = _run(
+        ["playlist", "update", "--home", str(vodp_home), "--non-interactive",
+         "--name", "Archive", "--new-title", "New Title"], capsys,
+    )
+    assert code == exitcodes.ENV_OR_API_ERROR
+    assert not any(c["method"] == "update" for c in fake_youtube.calls)
 
 
 # -- auth migrate -------------------------------------------------------------

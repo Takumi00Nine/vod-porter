@@ -4,7 +4,7 @@
 
 ![Python >=3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests 373 passing](https://img.shields.io/badge/tests-373%20passing-brightgreen)
+![Tests 399 passing](https://img.shields.io/badge/tests-399%20passing-brightgreen)
 
 ## Overview
 
@@ -99,7 +99,8 @@ counts as a found target for the `--allow-empty`/exit-3 decision.
 `[channel] expected_channel_id` (F5, Codex/tester review round 2,
 differed-items follow-up; requirements.md 推奨S7) is optional but
 recommended: every write-type command (`vods upload`, `videos publish`/
-`delete`, `meta set`, `playlist create`/`add`/`delete`/`remove-item`)
+`delete`, `meta set`, `playlist create`/`add`/`update`/`delete`/`remove-item`,
+`channel update`)
 confirms the currently authenticated account's channel id matches it
 *before* doing anything -- a wrong OAuth account (e.g. authorized
 against a personal channel by mistake) fails fast (exit 5) instead of
@@ -128,7 +129,9 @@ vodp videos list | publish --video-id ID --privacy public | delete --video-id ID
 vodp meta set --video-id ID [--title ...] [--description-file ...] [--tags a,b] [--category-id 22]
                             [--playlist-id ID]
 vodp playlist list | create --name NAME | add --name NAME --video-id ID
+                    | update --name NAME [--new-title T] [--description D]
                     | delete --playlist-id ID [--yes] | remove-item --playlist-id ID --video-id ID [--yes]
+vodp channel show | update --description DESCRIPTION [--dry-run]
 vodp cache clean [--yes] [--max-age-hours 24] [--channel ID]
 vodp ledger recover --channel ID | repair --channel ID | resolve --channel ID --vod ID --action reinsert|abandon --yes
 vodp auth login | migrate --pickle-path PATH
@@ -151,6 +154,37 @@ explicitly refuses `--privacy` (exit 2, R9, Codex/tester review round 2)
 rather than silently accepting and ignoring it; use
 `vodp videos publish --video-id ID --privacy ...` for a privacy change
 (it also does the readback verification M11 requires).
+
+`playlist update --name CURRENT_TITLE` requires at least one of
+`--new-title`/`--description` (exit 2 if both are omitted; giving both
+together is fine -- they're independent, not mutually exclusive) and
+resolves the target
+via the same `find_playlist_by_name` lookup `playlist add` uses -- but,
+unlike `add`, never auto-creates: a name that doesn't resolve to exactly
+one playlist is refused (exit 5), the same posture as the misdeletion
+guard below. Because `playlists.update` replaces the whole `snippet` part
+(not just the given fields), it always reads the current snippet back via
+`playlists.list` first and merges in only the touched field(s) -- title is
+always re-sent even for a description-only change, since it's a required
+API field. `status` is never touched. `--dry-run` makes no API calls at
+all (same posture as `create`/`add`'s dry-run, not `delete`'s
+read-then-skip).
+
+`channel show` is a read-only detail view of the authenticated channel
+(id/title/description/customUrl, `part=snippet,brandingSettings`) --
+`whoami` stays the cheap `part=snippet`-only identity check it always
+was, unchanged. `channel update --description DESCRIPTION` only ever
+writes `part=brandingSettings` (`channels.update` doesn't support
+`part=snippet` at all -- `snippet.title`/`description` are read-only to
+API consumers). It reads the current `brandingSettings` back via
+`channels.list` first and merges in only `description`, preserving every
+other field (`keywords`, any legacy sub-objects, etc.) untouched --
+including always re-sending the channel's *current, unchanged* `title`,
+since `channels.update` rejects any actual title change outright
+(`channelTitleUpdateForbidden`; renaming a channel is only possible in
+YouTube Studio, not through this API at all) -- there is accordingly no
+`--title` flag here. `--dry-run` makes no API calls at all (same posture
+as `playlist create`/`add`/`update`'s dry-run).
 
 Destructive commands (`videos delete`, `playlist delete`,
 `playlist remove-item`, `cache clean`) default to a **dry-run preview** and
@@ -373,7 +407,7 @@ TWITCH_CHANNEL_LOGIN=your_channel_login
 
 `[limits] earliest_date` は、`vodp` へ切り替える前に旧スクリプトが既に公開したものを再アップロードしないためのガードであり、自分の移行日を設定する。`--dry-run` と実実行のどちらでも同一に適用される（team-lead E2E フォローアップ：以前は dry-run がこのカットオフを完全にスキップしており、dry-run が「約束」した VOD を実実行が黙って除外してしまうことがあり、M7 の「dry-run は完全なプレビュー」という保証に違反していた）-- このカットオフで除外された VOD は両方とも `status: skipped, reason_code: out_of_range`（`dry_run`／既にアップロード済みによる no-op 等とは区別される）として報告され、`--allow-empty`/exit-3 判定における「見つかった対象」としてはカウントされない。
 
-`[channel] expected_channel_id`（F5・Codex/tester レビュー第2ラウンド、差分項目のフォローアップ；requirements.md 推奨S7）は任意だが推奨設定：書込系コマンド（`vods upload`・`videos publish`/`delete`・`meta set`・`playlist create`/`add`/`delete`/`remove-item`）はすべて、実行前に現在認証中のアカウントのチャンネルIDがこの値と一致することを確認する -- 誤った OAuth アカウント（例：個人チャンネルで誤って認可）は、無人実行を誰も見ていない状況で誤ったチャンネルへ黙ってアップロード/公開/削除する代わりに、即座に失敗する（exit 5）。未設定（パッケージ既定）の場合はこのチェック自体をスキップする -- 新たな既定要件ではなく opt-in。
+`[channel] expected_channel_id`（F5・Codex/tester レビュー第2ラウンド、差分項目のフォローアップ；requirements.md 推奨S7）は任意だが推奨設定：書込系コマンド（`vods upload`・`videos publish`/`delete`・`meta set`・`playlist create`/`add`/`update`/`delete`/`remove-item`・`channel update`）はすべて、実行前に現在認証中のアカウントのチャンネルIDがこの値と一致することを確認する -- 誤った OAuth アカウント（例：個人チャンネルで誤って認可）は、無人実行を誰も見ていない状況で誤ったチャンネルへ黙ってアップロード/公開/削除する代わりに、即座に失敗する（exit 5）。未設定（パッケージ既定）の場合はこのチェック自体をスキップする -- 新たな既定要件ではなく opt-in。
 
 ## 旧 app/+sh/ スクリプトからの移行
 
@@ -389,7 +423,9 @@ vodp videos list | publish --video-id ID --privacy public | delete --video-id ID
 vodp meta set --video-id ID [--title ...] [--description-file ...] [--tags a,b] [--category-id 22]
                             [--playlist-id ID]
 vodp playlist list | create --name NAME | add --name NAME --video-id ID
+                    | update --name NAME [--new-title T] [--description D]
                     | delete --playlist-id ID [--yes] | remove-item --playlist-id ID --video-id ID [--yes]
+vodp channel show | update --description DESCRIPTION [--dry-run]
 vodp cache clean [--yes] [--max-age-hours 24] [--channel ID]
 vodp ledger recover --channel ID | repair --channel ID | resolve --channel ID --vod ID --action reinsert|abandon --yes
 vodp auth login | migrate --pickle-path PATH
@@ -399,6 +435,10 @@ vodp whoami
 ```
 
 すべてのサブコマンドは `--profile`・`--home`・`--non-interactive`・`--json`（互換性のため受け付けるが、JSON は常に stdout に出力される。下記参照）・`--ledger`（台帳パスの上書き）を受け付ける。`--range` は日付のみ（`2026-07-27`、JST の1日全体に展開）または完全な日時（`"2026-07-27 09:00:00"`）を受け付ける。上記の一覧はコマンドの一覧であり、全フラグを網羅したものではない（例: `--dry-run`・`playlist create --privacy`・`launchd generate --label`）-- 全オプションを確認するには `vodp <command> <subcommand> --help` を実行すること。`meta set` は常に `part=snippet`（title/description/tags/categoryId）のマージ更新のみを行う -- `--playlist` は受け付けず（`--playlist-id` のみ、下記 M22 節参照）、`--privacy` は明示的に拒否する（exit 2、R9、Codex/tester レビュー第2ラウンド）-- 黙って受理して無視するのではなく。公開範囲を変更する場合は `vodp videos publish --video-id ID --privacy ...` を使うこと（M11 が要求する読み戻し検証も行う）。
+
+`playlist update --name 現在のタイトル` は `--new-title`/`--description` の少なくとも一方を要求する（両方省略は exit 2、両方同時指定も可能 -- 互いに排他ではない）。対象解決は `playlist add` と同じ `find_playlist_by_name` を流用するが、`add` と異なり自動作成はしない -- 名前が唯一のプレイリストに解決できない場合は拒否する（exit 5、下記の誤削除防止ガードと同じ姿勢）。`playlists.update` は `snippet` パート全体を置き換えてしまうため（部分更新は不可）、必ず `playlists.list` で現在の snippet を読み戻してから触れたフィールドだけをマージする -- title は API の必須フィールドなので description のみの変更でも常に再送する。`status` には一切触れない。`--dry-run` は API 呼び出しを一切行わない（`delete` の「読んでからスキップ」ではなく `create`/`add` の dry-run と同じ姿勢）。
+
+`channel show` は認証中チャンネルの詳細な読み取り専用ビュー（id/title/description/customUrl、`part=snippet,brandingSettings`）-- `whoami` は従来通り `part=snippet` のみの軽量な身元確認のままで変更なし。`channel update --description DESCRIPTION` は常に `part=brandingSettings` のみを書き込む（`channels.update` は `part=snippet` を一切サポートしない -- `snippet.title`/`description` は API 利用者からは読み取り専用）。必ず `channels.list` で現在の `brandingSettings` を読み戻し、`description` のみをマージする -- `keywords` や旧仕様の他のサブオブジェクトなど、触れていないフィールドはすべて保持する。title についても、現在の値を変更せず常に再送する -- `channels.update` はタイトルへの実際の変更をすべて拒否するため（`channelTitleUpdateForbidden`。チャンネル名の変更は YouTube Studio でのみ可能であり、この API では一切できない）、`--title` フラグはここには存在しない。`--dry-run` は API 呼び出しを一切行わない（`playlist create`/`add`/`update` の dry-run と同じ姿勢）。
 
 破壊的コマンド（`videos delete`・`playlist delete`・`playlist remove-item`・`cache clean`）は既定で **dry-run プレビュー** となり、実際に実行するには `--yes` が必須。`--non-interactive` 下で `--yes` を省略すると、サイレントな no-op ではなく引数エラー（exit 2）となるため、無人ジョブがプレビューを完了扱いと誤認することはない。いずれのコマンドも何かを決定する前に対象を読み戻し（id+タイトル、`cache clean` の場合は台帳状態）、その読み戻しで対象の実在が確認できない場合（`videos.list`/`playlists.list` の結果が空、`playlistItems.list` の API 失敗、または台帳が現在 `ledger_corrupt` の場合）は、dry-run でも `--yes` 付きでも削除を拒否する。コマンドごとの誤削除防止の受入条件は `tests/test_cli_youtube_commands.py` と `tests/test_cli_check_cache.py`（Codex/tester レビュー第2ラウンド、R5）を参照。
 
