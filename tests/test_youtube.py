@@ -77,6 +77,55 @@ def test_list_my_uploaded_videos_uses_uploads_playlist_with_pagination():
     assert playlist_item_calls[1]["kwargs"]["pageToken"] == "page2"
 
 
+# -- videos status (read-only status+processingDetails, team-lead-assigned 2026-08-08) --
+
+def test_get_videos_status_and_processing_single_call_part_and_id_join():
+    fake = FakeYouTube()
+    fake.queue("videos", "list", {"items": [
+        {"id": "v1", "status": {"uploadStatus": "processed"}, "processingDetails": {"processingStatus": "succeeded"}},
+        {"id": "v2", "status": {"uploadStatus": "uploaded"}, "processingDetails": {"processingStatus": "processing"}},
+    ]})
+    results = yt.get_videos_status_and_processing(fake, ["v1", "v2"])
+    assert set(results) == {"v1", "v2"}
+    assert results["v2"]["processingDetails"]["processingStatus"] == "processing"
+    call = fake.calls[0]
+    assert call["kwargs"]["part"] == "status,processingDetails"
+    assert call["kwargs"]["id"] == "v1,v2"
+
+
+def test_get_videos_status_and_processing_sends_max_results_for_chunk_size():
+    """Codex review major #1: videos.list's maxResults defaults to 5 --
+    omitting it would silently truncate a >5-id chunk to its first 5,
+    making the rest look like missing ids to the caller."""
+    fake = FakeYouTube()
+    ids = [f"v{i}" for i in range(8)]
+    fake.queue("videos", "list", {"items": [{"id": vid, "status": {}, "processingDetails": {}} for vid in ids]})
+    results = yt.get_videos_status_and_processing(fake, ids)
+    assert len(results) == 8
+    assert fake.calls[0]["kwargs"]["maxResults"] == 8
+
+
+def test_get_videos_status_and_processing_missing_id_absent_from_result():
+    fake = FakeYouTube()
+    fake.queue("videos", "list", {"items": [{"id": "v1", "status": {}, "processingDetails": {}}]})
+    results = yt.get_videos_status_and_processing(fake, ["v1", "v2-does-not-exist"])
+    assert set(results) == {"v1"}  # never raises for the missing one
+
+
+def test_get_videos_status_and_processing_batches_over_50_ids():
+    fake = FakeYouTube()
+    ids = [f"v{i}" for i in range(75)]
+    fake.queue("videos", "list", {"items": [{"id": vid, "status": {}, "processingDetails": {}} for vid in ids[:50]]})
+    fake.queue("videos", "list", {"items": [{"id": vid, "status": {}, "processingDetails": {}} for vid in ids[50:]]})
+    results = yt.get_videos_status_and_processing(fake, ids)
+    assert len(results) == 75
+    assert len(fake.calls) == 2
+    assert fake.calls[0]["kwargs"]["id"].count(",") == 49  # 50 ids in the first chunk
+    assert fake.calls[1]["kwargs"]["id"].count(",") == 24  # remaining 25 ids
+    assert fake.calls[0]["kwargs"]["maxResults"] == 50
+    assert fake.calls[1]["kwargs"]["maxResults"] == 25
+
+
 # -- M12 playlist resolve/dedup --------------------------------------------
 
 def test_find_playlist_by_name_exact_match():

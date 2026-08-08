@@ -164,6 +164,42 @@ def get_video_status(youtube, video_id: str, *, retry_budget: RetryBudget | None
     return items[0]["status"]
 
 
+def get_videos_status_and_processing(
+    youtube, video_ids: list[str], *, retry_budget: RetryBudget | None = None, deadline=None,
+) -> dict[str, dict]:
+    """``vodp videos status`` (read-only diagnostic, team-lead-assigned
+    2026-08-08): ``status`` (uploadStatus/failureReason/rejectionReason/
+    privacyStatus) + ``processingDetails`` (processingStatus/
+    processingProgress/processingFailureReason) for one or more video
+    ids, confirmed against
+    https://developers.google.com/youtube/v3/docs/videos/list and
+    https://developers.google.com/youtube/v3/docs/videos -- both parts
+    are valid ``part`` values, ``videos.list`` accepts up to 50
+    comma-separated ids per call, and the call costs 1 quota unit
+    regardless of how many parts/ids are requested in it.
+
+    Never raises for an individual id that YouTube doesn't return (e.g.
+    it doesn't exist, or belongs to another account) -- that id is
+    simply absent from the returned dict; the caller (which already
+    knows the full requested id list) decides how to report the gap,
+    same shape as ``playlist_contains_video`` deferring absence-handling
+    to its caller."""
+    results: dict[str, dict] = {}
+    for i in range(0, len(video_ids), 50):
+        chunk = video_ids[i : i + 50]
+        # maxResults defaults to 5 (confirmed against the same reference
+        # above) -- omitting it would silently truncate any chunk of more
+        # than 5 ids to their first 5, making the rest look like missing
+        # ids to the caller (Codex review, major #1).
+        resp = _execute(
+            youtube.videos().list(part="status,processingDetails", id=",".join(chunk), maxResults=len(chunk)),
+            retry_budget=retry_budget, deadline=deadline,
+        )
+        for item in resp.get("items", []):
+            results[item["id"]] = item
+    return results
+
+
 def get_video_snippet(youtube, video_id: str, *, retry_budget: RetryBudget | None = None, deadline=None) -> dict:
     resp = _execute(youtube.videos().list(part="snippet", id=video_id), retry_budget=retry_budget, deadline=deadline)
     items = resp.get("items", [])

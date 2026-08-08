@@ -6,6 +6,7 @@ repair/resolve admin flows."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -243,7 +244,146 @@ def test_registry_prevents_split_ledger_for_same_channel(tmp_path):
 def test_registry_registers_first_use(tmp_path):
     path = resolve_ledger_path(tmp_path, "UCabc")
     registry = json.loads((tmp_path / "ledger" / "registry.json").read_text())
-    assert registry["UCabc"] == str(path)
+    assert registry["UCabc"] == path.relative_to(tmp_path).as_posix()
+
+
+# -- VODP_HOME relocation hardening (2026-08-08, team-lead-assigned): -------
+# registry stores home-relative paths (so a whole-home move stays valid),
+# with automatic one-way migration of old absolute-format entries, and an
+# absolute path retained verbatim for anything genuinely outside home.
+
+
+def test_registry_stores_home_relative_path_for_canonical_default(tmp_path):
+    path = resolve_ledger_path(tmp_path, "UCabc")
+    registry = json.loads((tmp_path / "ledger" / "registry.json").read_text())
+    assert registry["UCabc"] == "ledger/UCabc.jsonl"
+    assert path == tmp_path / "ledger" / "UCabc.jsonl"
+
+
+def test_registry_survives_home_relocation(tmp_path):
+    """The exact 2026-07-29 failure mode: VODP_HOME is moved wholesale
+    (dir renamed) and a later run must still resolve the same channel to
+    its ledger under the *new* home, with no manual sed-style repair."""
+    old_home = tmp_path / "old_home"
+    resolve_ledger_path(old_home, "UCabc")
+
+    new_home = tmp_path / "new_home"
+    old_home.rename(new_home)
+
+    # Must resolve cleanly under the new home, both read-write and
+    # read-only, with no LedgerError registry mismatch.
+    resolved = resolve_ledger_path(new_home, "UCabc")
+    assert resolved == new_home / "ledger" / "UCabc.jsonl"
+    resolved_ro = resolve_ledger_path(new_home, "UCabc", register=False)
+    assert resolved_ro == resolved
+
+
+def test_registry_migrates_old_absolute_format_entry_and_is_idempotent(tmp_path):
+    """A pre-existing registry written by the old code (absolute paths,
+    even for entries under home) is read correctly and rewritten to the
+    relative form on the next register=True call -- one-directional,
+    lossless (same resolved path before/after), and idempotent (running
+    it again doesn't change the file further)."""
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    old_style_path = ledger_dir / "UCabc.jsonl"
+    registry_path = ledger_dir / "registry.json"
+    registry_path.write_text(json.dumps({"UCabc": str(old_style_path)}), encoding="utf-8")
+
+    resolved = resolve_ledger_path(tmp_path, "UCabc")
+    assert resolved == old_style_path  # lossless: same target as before migration
+
+    migrated = json.loads(registry_path.read_text())
+    assert migrated["UCabc"] == "ledger/UCabc.jsonl"  # migrated to relative
+
+    # idempotent: running again with the now-relative entry changes nothing
+    resolve_ledger_path(tmp_path, "UCabc")
+    assert json.loads(registry_path.read_text()) == migrated
+
+
+def test_registry_keeps_out_of_home_override_absolute_and_unmigrated(tmp_path):
+    """A --ledger override pointing entirely outside VODP_HOME can't be
+    relativized and is stored/left as an absolute path -- moving home
+    must not (and structurally cannot) affect it."""
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    outside_path = outside_dir / "custom.jsonl"
+
+    resolve_ledger_path(tmp_path / "home", "UCabc", override=str(outside_path))
+    registry_path = tmp_path / "home" / "ledger" / "registry.json"
+    registry = json.loads(registry_path.read_text())
+    assert registry["UCabc"] == str(outside_path)  # absolute, unrelativizable
+
+    # a subsequent run still resolves it correctly and doesn't rewrite it
+    resolved = resolve_ledger_path(tmp_path / "home", "UCabc", override=str(outside_path))
+    assert resolved == outside_path
+    assert json.loads(registry_path.read_text()) == registry
+
+
+def test_registry_migration_works_when_home_passed_relative_or_via_symlink(tmp_path, monkeypatch):
+    """Codex review major #2: the migration/uniqueness comparisons must
+    use the same normalization for ``home`` as for stored values --
+    otherwise a relative or symlinked ``home`` makes an under-home old
+    absolute entry wrongly look external and never migrates."""
+    real_home = tmp_path / "real_home"
+    old_style_path = real_home / "ledger" / "UCabc.jsonl"
+    (real_home / "ledger").mkdir(parents=True)
+    (real_home / "ledger" / "registry.json").write_text(
+        json.dumps({"UCabc": str(old_style_path)}), encoding="utf-8"
+    )
+
+    # relative home (relative to the test's cwd)
+    monkeypatch.chdir(tmp_path)
+    resolved = resolve_ledger_path(Path("real_home"), "UCabc")
+    assert resolved == old_style_path
+    migrated = json.loads((real_home / "ledger" / "registry.json").read_text())
+    assert migrated["UCabc"] == "ledger/UCabc.jsonl"
+
+    # symlinked home
+    link_home = tmp_path / "link_home"
+    link_home.symlink_to(real_home)
+    resolved_via_link = resolve_ledger_path(link_home, "UCabc")
+    assert resolved_via_link == old_style_path
+
+
+def test_registry_migration_leaves_out_of_home_symlinked_entry_byte_for_byte(tmp_path):
+    """Codex review minor follow-up: an absolute registry entry that's
+    genuinely outside home must never be rewritten during migration, not
+    even to a `.resolve()`-normalized spelling of the same real path
+    (e.g. a symlink hop) -- only entries that actually become relative
+    are ever touched."""
+    real_external = tmp_path / "real_external"
+    real_external.mkdir()
+    link_external = tmp_path / "link_external"
+    link_external.symlink_to(real_external)
+    unresolved_external_entry = str(link_external / "custom.jsonl")
+    assert unresolved_external_entry != str(Path(unresolved_external_entry).resolve())  # sanity: symlink differs
+
+    home = tmp_path / "home"
+    (home / "ledger").mkdir(parents=True)
+    canonical_path = home / "ledger" / "UCabc.jsonl"
+    (home / "ledger" / "registry.json").write_text(json.dumps({
+        "UCabc": str(canonical_path),  # old-format, under home -- expected to migrate
+        "UCexternal": unresolved_external_entry,  # old-format, outside home -- must stay untouched
+    }), encoding="utf-8")
+
+    resolve_ledger_path(home, "UCabc")
+
+    registry = json.loads((home / "ledger" / "registry.json").read_text())
+    assert registry["UCabc"] == "ledger/UCabc.jsonl"  # migrated
+    assert registry["UCexternal"] == unresolved_external_entry  # byte-for-byte unchanged
+
+
+def test_registry_readonly_lookup_resolves_relative_entry(tmp_path):
+    """register=False must resolve a relative-format entry the same way
+    the register=True path does, without ever writing anything."""
+    resolve_ledger_path(tmp_path, "UCabc")  # establishes the relative entry
+    registry_path = tmp_path / "ledger" / "registry.json"
+    before = registry_path.read_text()
+
+    resolved = resolve_ledger_path(tmp_path, "UCabc", register=False)
+    assert resolved == tmp_path / "ledger" / "UCabc.jsonl"
+    assert registry_path.read_text() == before  # still side-effect-free
 
 
 def test_event_rows_do_not_affect_current_state(tmp_path):

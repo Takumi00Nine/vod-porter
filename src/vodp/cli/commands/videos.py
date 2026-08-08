@@ -76,6 +76,54 @@ def run_publish(args, ctx):
     return exitcodes.OK, envelope
 
 
+def run_status(args, ctx):
+    """``vodp videos status`` (read-only diagnostic, team-lead-assigned
+    2026-08-08): never calls a write-type API -- only
+    ``yt_infra.get_videos_status_and_processing`` (``videos.list``).
+    A requested id YouTube doesn't return is reported per-item as
+    ``status: failed``/``reason_code: not_found`` rather than aborting
+    the whole batch, so one bad id among several good ones still shows
+    the others."""
+    youtube = _client(ctx, args)
+    found = yt_infra.get_videos_status_and_processing(youtube, args.video_ids)
+    videos = []
+    for video_id in args.video_ids:
+        item = found.get(video_id)
+        if item is None:
+            videos.append({
+                "twitch_vod_id": None, "status": "failed", "reason_code": reasons.NOT_FOUND,
+                "youtube_video_id": video_id,
+            })
+            continue
+        status = item.get("status", {})
+        processing = item.get("processingDetails", {})
+        progress = processing.get("processingProgress")
+        videos.append({
+            "twitch_vod_id": None, "status": "skipped", "reason_code": None,
+            "youtube_video_id": video_id,
+            "upload_status": status.get("uploadStatus"),
+            "failure_reason": status.get("failureReason"),
+            "rejection_reason": status.get("rejectionReason"),
+            "privacy_status": status.get("privacyStatus"),
+            "processing_status": processing.get("processingStatus"),
+            "processing_failure_reason": processing.get("processingFailureReason"),
+            "processing_progress": {
+                "parts_total": progress.get("partsTotal"),
+                "parts_processed": progress.get("partsProcessed"),
+                "time_left_ms": progress.get("timeLeftMs"),
+            } if progress is not None else None,
+        })
+    failed = sum(1 for v in videos if v["status"] == "failed")
+    summary = {"total": len(videos), "uploaded": 0, "skipped": len(videos) - failed, "failed": failed}
+    envelope = jsonout.build_envelope(run=ctx.run_header(), videos=videos, summary=summary)
+    # M11's run_publish sets the same precedent (private-still -> 6): a
+    # per-item problem within an otherwise-successful read is
+    # PARTIAL_FAILURE, not a hard error -- the other requested ids still
+    # resolved fine and are still reported.
+    exit_code = exitcodes.PARTIAL_FAILURE if failed else exitcodes.OK
+    return exit_code, envelope
+
+
 def run_delete(args, ctx):
     execute = resolve_execute(args)
     # M7 (Codex/tester review round 2, R2 follow-up): the dry-run preview

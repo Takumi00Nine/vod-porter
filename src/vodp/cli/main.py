@@ -43,6 +43,7 @@ def _build_dispatch():
         ("vods", "list"): cmd_vods.run_list,
         ("vods", "upload"): cmd_vods.run_upload,
         ("videos", "list"): cmd_videos.run_list,
+        ("videos", "status"): cmd_videos.run_status,
         ("videos", "publish"): cmd_videos.run_publish,
         ("videos", "delete"): cmd_videos.run_delete,
         ("meta", "set"): cmd_meta.run_set,

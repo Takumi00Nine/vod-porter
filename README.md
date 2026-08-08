@@ -49,6 +49,17 @@ vodp's state/config directory (`VODP_HOME`) resolves in this order:
   downloads/        # transient download workspace
 ```
 
+`ledger/registry.json` maps each channel id to its canonical ledger path,
+stored **relative to `VODP_HOME`** whenever that path lives under it (the
+default `<channel_id>.jsonl` location always does) -- so relocating the
+whole `VODP_HOME` directory (rename/move/copy) keeps every canonical
+ledger path resolving correctly, with no manual repair. A registry
+written by an older vodp version (absolute paths even for entries under
+home) is read correctly either way and opportunistically rewritten to
+the relative form the next time it's touched; only a `--ledger` override
+path that's genuinely outside `VODP_HOME` stays absolute (correctly --
+it's not affected by a home move either way).
+
 ### Secrets: `<VODP_HOME>/.env`
 
 ```env
@@ -126,6 +137,7 @@ vodp vods list --range 2026-07-27 2026-07-27
 vodp vods upload [--range START END] [--dry-run] [--max-uploads N] [--allow-empty]
                  [--playlist NAME | --playlist-id ID] [--deadline SECONDS]
 vodp videos list | publish --video-id ID --privacy public | delete --video-id ID [--yes]
+vodp videos status --video-id ID [ID2 ...]
 vodp meta set --video-id ID [--title ...] [--description-file ...] [--tags a,b] [--category-id 22]
                             [--playlist-id ID]
 vodp playlist list | create --name NAME | add --name NAME --video-id ID
@@ -185,6 +197,17 @@ since `channels.update` rejects any actual title change outright
 YouTube Studio, not through this API at all) -- there is accordingly no
 `--title` flag here. `--dry-run` makes no API calls at all (same posture
 as `playlist create`/`add`/`update`'s dry-run).
+
+`videos status --video-id ID [ID2 ...]` is a read-only diagnostic: it
+calls `videos.list` with `part=status,processingDetails` (one call per up
+to 50 ids) and shows each video's `uploadStatus`/`failureReason`/
+`rejectionReason`/`privacyStatus` plus `processingStatus`/
+`processingProgress` (parts total/processed, estimated time left)/
+`processingFailureReason` -- useful for checking how far a long upload's
+YouTube-side transcoding has gotten. It never calls a write-type API. A
+requested id YouTube doesn't return is reported per-item as
+`status: "failed"`/`reason_code: "not_found"` (exit 6, `PARTIAL_FAILURE`)
+rather than aborting the whole batch -- the other ids are still reported.
 
 Destructive commands (`videos delete`, `playlist delete`,
 `playlist remove-item`, `cache clean`) default to a **dry-run preview** and
@@ -385,6 +408,8 @@ vodp の状態/設定ディレクトリ（`VODP_HOME`）は次の優先順位で
   downloads/        # ダウンロード用の一時作業領域
 ```
 
+`ledger/registry.json` は各チャンネルIDと正規台帳パスの対応を保持するが、そのパスが `VODP_HOME` 配下にある限り（既定の `<channel_id>.jsonl` は常にそう）**`VODP_HOME` からの相対パス**として保存する -- これにより `VODP_HOME` ディレクトリ自体をまるごと移設（rename/move/copy）しても、正規台帳パスの照合が壊れず、手動修正が不要になる。旧バージョンの vodp が書いた registry（`VODP_HOME` 配下のエントリでも絶対パスで保存されている）はどちらの形式でも正しく読み込め、次にそのエントリに触れた際に相対形式へ書き戻される（機会主義的マイグレーション）。`--ledger` で `VODP_HOME` の外を指す上書きパスのみ絶対パスのまま保持される（正しい挙動 -- `VODP_HOME` の移設で影響を受けるべきではないため）。
+
 ### 秘密情報: `<VODP_HOME>/.env`
 
 ```env
@@ -420,6 +445,7 @@ vodp vods list --range 2026-07-27 2026-07-27
 vodp vods upload [--range START END] [--dry-run] [--max-uploads N] [--allow-empty]
                  [--playlist NAME | --playlist-id ID] [--deadline SECONDS]
 vodp videos list | publish --video-id ID --privacy public | delete --video-id ID [--yes]
+vodp videos status --video-id ID [ID2 ...]
 vodp meta set --video-id ID [--title ...] [--description-file ...] [--tags a,b] [--category-id 22]
                             [--playlist-id ID]
 vodp playlist list | create --name NAME | add --name NAME --video-id ID
@@ -439,6 +465,8 @@ vodp whoami
 `playlist update --name 現在のタイトル` は `--new-title`/`--description` の少なくとも一方を要求する（両方省略は exit 2、両方同時指定も可能 -- 互いに排他ではない）。対象解決は `playlist add` と同じ `find_playlist_by_name` を流用するが、`add` と異なり自動作成はしない -- 名前が唯一のプレイリストに解決できない場合は拒否する（exit 5、下記の誤削除防止ガードと同じ姿勢）。`playlists.update` は `snippet` パート全体を置き換えてしまうため（部分更新は不可）、必ず `playlists.list` で現在の snippet を読み戻してから触れたフィールドだけをマージする -- title は API の必須フィールドなので description のみの変更でも常に再送する。`status` には一切触れない。`--dry-run` は API 呼び出しを一切行わない（`delete` の「読んでからスキップ」ではなく `create`/`add` の dry-run と同じ姿勢）。
 
 `channel show` は認証中チャンネルの詳細な読み取り専用ビュー（id/title/description/customUrl、`part=snippet,brandingSettings`）-- `whoami` は従来通り `part=snippet` のみの軽量な身元確認のままで変更なし。`channel update --description DESCRIPTION` は常に `part=brandingSettings` のみを書き込む（`channels.update` は `part=snippet` を一切サポートしない -- `snippet.title`/`description` は API 利用者からは読み取り専用）。必ず `channels.list` で現在の `brandingSettings` を読み戻し、`description` のみをマージする -- `keywords` や旧仕様の他のサブオブジェクトなど、触れていないフィールドはすべて保持する。title についても、現在の値を変更せず常に再送する -- `channels.update` はタイトルへの実際の変更をすべて拒否するため（`channelTitleUpdateForbidden`。チャンネル名の変更は YouTube Studio でのみ可能であり、この API では一切できない）、`--title` フラグはここには存在しない。`--dry-run` は API 呼び出しを一切行わない（`playlist create`/`add`/`update` の dry-run と同じ姿勢）。
+
+`videos status --video-id ID [ID2 ...]` は読み取り専用の診断コマンド：`videos.list` を `part=status,processingDetails` で呼び出し（最大50 ID/回）、各動画の `uploadStatus`/`failureReason`/`rejectionReason`/`privacyStatus` と `processingStatus`/`processingProgress`（処理済みパート数・残り推定時間）/`processingFailureReason` を表示する -- 長尺動画のアップロード後、YouTube 側のトランスコード進捗を確認する用途。書き込み系APIは一切呼ばない。指定した ID のうち YouTube が返さなかったものは、バッチ全体を中断せず `status: "failed"`・`reason_code: "not_found"`（exit 6・`PARTIAL_FAILURE`）として個別に報告する -- 他の ID は正常に報告され続ける。
 
 破壊的コマンド（`videos delete`・`playlist delete`・`playlist remove-item`・`cache clean`）は既定で **dry-run プレビュー** となり、実際に実行するには `--yes` が必須。`--non-interactive` 下で `--yes` を省略すると、サイレントな no-op ではなく引数エラー（exit 2）となるため、無人ジョブがプレビューを完了扱いと誤認することはない。いずれのコマンドも何かを決定する前に対象を読み戻し（id+タイトル、`cache clean` の場合は台帳状態）、その読み戻しで対象の実在が確認できない場合（`videos.list`/`playlists.list` の結果が空、`playlistItems.list` の API 失敗、または台帳が現在 `ledger_corrupt` の場合）は、dry-run でも `--yes` 付きでも削除を拒否する。コマンドごとの誤削除防止の受入条件は `tests/test_cli_youtube_commands.py` と `tests/test_cli_check_cache.py`（Codex/tester レビュー第2ラウンド、R5）を参照。
 

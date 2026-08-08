@@ -436,6 +436,87 @@ class _CorruptLine(str):
 
 
 # -- registry: one canonical ledger path per channel (§4) -------------------
+#
+# 2026-08-08 (VODP_HOME relocation hardening, team-lead-assigned): a
+# registry value is stored **relative to home** whenever the path it
+# names actually lives under home (the overwhelming common case -- the
+# canonical default always does) so that moving VODP_HOME wholesale (dir
+# rename/copy) no longer desyncs the registry against reality and trips
+# the fail-closed mismatch guard below (this happened for real on
+# 2026-07-29 and was hand-patched with `sed`). A value that is NOT under
+# home (an explicit ``--ledger`` override pointing elsewhere on disk) is
+# fundamentally home-independent and is stored as an absolute path,
+# unchanged by any future home move -- that is the correct behavior for
+# it, not a limitation.
+#
+# Old registries (written before this change) always stored absolute
+# paths, including for entries that *do* live under home. Format is
+# self-describing (``Path(value).is_absolute()``), so those are read
+# correctly too, and are opportunistically migrated to the relative form
+# and written back the next time this function runs with ``register=True``
+# (see ``_migrate_registry_to_relative`` below) -- one-directional
+# (absolute-under-home -> relative only; never the reverse), idempotent
+# (a value already in its target form is left untouched), and lossless
+# (the resolved path never changes, only its on-disk representation).
+# This migration only protects a *future* home move that happens after it
+# runs -- an already-relocated, never-migrated old registry still needs a
+# manual fix once (or a fresh registry) before this helps it.
+
+
+def _resolve_registry_entry(home: Path, raw: str) -> Path:
+    """A stored registry value is either an absolute path (old-format
+    entries, or any entry that is genuinely outside ``home``) or a
+    path relative to ``home`` (new-format entries under ``home``)."""
+    p = Path(raw)
+    return p if p.is_absolute() else (home / p)
+
+
+def _to_registry_value(home: Path, target: Path) -> str:
+    """The inverse of ``_resolve_registry_entry``: store relative-to-home
+    when possible, absolute when the target isn't under home at all.
+
+    ``target`` is fully re-resolved here (not just ``expanduser()``'d)
+    before the ``relative_to`` comparison -- ``resolve_ledger_path``
+    already normalizes ``home`` the same way before calling this, but an
+    old-format registry entry being migrated (``_migrate_registry_to_
+    relative`` below) may itself contain a relative path, a symlink
+    hop, or `.`/`..` segments a caller hand-edited; comparing two
+    differently-normalized paths would wrongly conclude an entry that
+    *is* under home isn't (Codex review, major #2)."""
+    target_resolved = Path(target).expanduser().resolve()
+    try:
+        return target_resolved.relative_to(home).as_posix()
+    except ValueError:
+        return str(target_resolved)
+
+
+def _migrate_registry_to_relative(home: Path, registry: dict[str, str]) -> bool:
+    """Mutates ``registry`` in place, rewriting any absolute-format entry
+    that resolves under the current ``home`` to the relative form.
+    Returns True if anything changed (caller decides whether to persist).
+
+    Only ever touches entries that are currently absolute
+    (``Path(raw).is_absolute()``) *and* that ``_to_registry_value``
+    actually turns into a relative value -- an already-relative entry is
+    left completely untouched, even if re-resolving it happened to
+    produce an identical value, so the direction of migration (absolute
+    -> relative, never the reverse) stays structurally guaranteed rather
+    than merely incidental (Codex review, major #2 follow-up). An
+    absolute entry that's genuinely outside ``home`` is also left
+    byte-for-byte as-is, even if ``.resolve()`` would have normalized it
+    to a different (but equivalent) absolute spelling -- e.g. a symlink
+    hop like macOS's ``/var`` -> ``/private/var`` -- since that entry was
+    never meant to change at all (Codex review, minor follow-up)."""
+    dirty = False
+    for channel, raw in list(registry.items()):
+        if not Path(raw).is_absolute():
+            continue
+        new_value = _to_registry_value(home, Path(raw))
+        if new_value != raw and not Path(new_value).is_absolute():
+            registry[channel] = new_value
+            dirty = True
+    return dirty
+
 
 def resolve_ledger_path(
     home: Path, channel_id: str, override: str | None = None, *, register: bool = True
@@ -448,7 +529,13 @@ def resolve_ledger_path(
     registry-level flock so two concurrent first-uses can't race and drop
     each other's registration.
     """
-    home = Path(home)
+    # Fully resolved (not just Path(home)) so the relative/absolute
+    # registry-format comparisons below use the same normalization as
+    # every stored/looked-up value, regardless of whether the caller
+    # already resolved `home` itself -- a relative or symlinked `home`
+    # would otherwise make an under-home path wrongly look external
+    # (Codex review, major #2).
+    home = Path(home).expanduser().resolve()
     ledger_dir = home / "ledger"
     registry_path = ledger_dir / "registry.json"
     canonical_default = ledger_dir / f"{channel_id}.jsonl"
@@ -459,12 +546,13 @@ def resolve_ledger_path(
         # its lock file (Codex #14 -- this path must stay side-effect-free
         # for future dry-run/read-only callers). A concurrent writer is
         # tolerated: worst case this returns a stale-but-still-correct
-        # answer, which is fine for a read-only caller.
+        # answer, which is fine for a read-only caller. Never migrates
+        # (writing back is register=True's job only).
         if not registry_path.exists():
             return target
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
         existing = registry.get(channel_id)
-        return Path(existing) if existing is not None else target
+        return _resolve_registry_entry(home, existing) if existing is not None else target
 
     fsops.durable_mkdir(ledger_dir)
     # blocking=True: this is a short read-small-json/write-small-json
@@ -475,37 +563,44 @@ def resolve_ledger_path(
         if registry_path.exists():
             registry = json.loads(registry_path.read_text(encoding="utf-8"))
 
+        dirty = _migrate_registry_to_relative(home, registry)
+
         # Validate the *whole* registry's path-uniqueness every time, not
         # just for this channel_id -- otherwise a duplicate written before
         # this check existed would go undetected forever (Codex #13).
         seen: dict[str, str] = {}
-        for other_channel, other_path in registry.items():
-            resolved = str(Path(other_path).expanduser().resolve())
+        for other_channel, other_value in registry.items():
+            resolved = str(_resolve_registry_entry(home, other_value).expanduser().resolve())
             if resolved in seen:
                 raise LedgerError(
                     f"registry {registry_path} already has two channels ({seen[resolved]!r} and "
-                    f"{other_channel!r}) mapped to the same ledger path {other_path}"
+                    f"{other_channel!r}) mapped to the same ledger path {other_value}"
                 )
             seen[resolved] = other_channel
 
         existing = registry.get(channel_id)
         if existing is not None:
-            if Path(existing).expanduser().resolve() != Path(target).expanduser().resolve():
+            existing_path = _resolve_registry_entry(home, existing)
+            if existing_path.expanduser().resolve() != Path(target).expanduser().resolve():
                 raise LedgerError(
-                    f"channel {channel_id} canonical ledger is {existing}, "
+                    f"channel {channel_id} canonical ledger is {existing_path}, "
                     f"but this run resolved {target} (registry mismatch)"
                 )
-            return Path(existing)
+            if dirty:
+                fsops.atomic_write_bytes(
+                    registry_path, json.dumps(registry, indent=2, sort_keys=True).encode("utf-8")
+                )
+            return existing_path
 
         target_resolved = Path(target).expanduser().resolve()
-        for other_channel, other_path in registry.items():
-            if Path(other_path).expanduser().resolve() == target_resolved:
+        for other_channel, other_value in registry.items():
+            if _resolve_registry_entry(home, other_value).expanduser().resolve() == target_resolved:
                 raise LedgerError(
                     f"ledger path {target} is already registered to channel "
                     f"{other_channel!r}; refusing to also use it for {channel_id!r}"
                 )
 
-        registry[channel_id] = str(target)
+        registry[channel_id] = _to_registry_value(home, target)
         fsops.atomic_write_bytes(
             registry_path, json.dumps(registry, indent=2, sort_keys=True).encode("utf-8")
         )

@@ -119,6 +119,15 @@ def build_parser() -> argparse.ArgumentParser:
     videos_publish.add_argument("--video-id", required=True)
     videos_publish.add_argument("--privacy", choices=PRIVACY_CHOICES, required=True)
 
+    videos_status = videos_sub.add_parser(
+        "status", help="show uploadStatus/processingDetails for one or more videos (read-only)",
+    )
+    _add_common(videos_status)
+    videos_status.add_argument(
+        "--video-id", dest="video_ids", nargs="+", required=True,
+        help="one or more YouTube video ids (space-separated)",
+    )
+
     videos_delete = videos_sub.add_parser("delete", help="delete a video (default dry-run)")
     _add_common(videos_delete)
     _add_dry_run(videos_delete)

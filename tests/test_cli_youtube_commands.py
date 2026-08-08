@@ -288,6 +288,63 @@ def test_videos_list(vodp_home, fake_youtube, capsys):
     _validate("videos_list", out)
 
 
+# -- videos status (read-only diagnostic, team-lead-assigned 2026-08-08) ----
+
+def test_videos_status_success_multiple_ids(vodp_home, fake_youtube, capsys):
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("videos", "list", {"items": [
+        {
+            "id": "v1",
+            "status": {"uploadStatus": "processed", "privacyStatus": "private"},
+            "processingDetails": {"processingStatus": "succeeded"},
+        },
+        {
+            "id": "v2",
+            "status": {"uploadStatus": "uploaded", "privacyStatus": "private"},
+            "processingDetails": {
+                "processingStatus": "processing",
+                "processingProgress": {"partsTotal": "100", "partsProcessed": "40", "timeLeftMs": "7200000"},
+            },
+        },
+    ]})
+    code, out = _run(
+        ["videos", "status", "--home", str(vodp_home), "--non-interactive", "--video-id", "v1", "v2"], capsys,
+    )
+    assert code == exitcodes.OK
+    assert out["videos"][0]["upload_status"] == "processed"
+    assert out["videos"][1]["processing_status"] == "processing"
+    assert out["videos"][1]["processing_progress"]["time_left_ms"] == "7200000"
+    call = fake_youtube.calls[0]
+    assert call["kwargs"]["part"] == "status,processingDetails"
+    assert call["kwargs"]["id"] == "v1,v2"
+    _validate("videos_status", out)
+
+
+def test_videos_status_missing_id_reported_not_found_and_exits_partial_failure(vodp_home, fake_youtube, capsys):
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("videos", "list", {"items": [
+        {"id": "v1", "status": {"uploadStatus": "processed"}, "processingDetails": {"processingStatus": "succeeded"}},
+    ]})
+    code, out = _run(
+        ["videos", "status", "--home", str(vodp_home), "--non-interactive", "--video-id", "v1", "v-missing"], capsys,
+    )
+    assert code == exitcodes.PARTIAL_FAILURE
+    assert out["videos"][0]["status"] == "skipped"
+    assert out["videos"][1]["status"] == "failed"
+    assert out["videos"][1]["reason_code"] == "not_found"
+    assert out["videos"][1]["youtube_video_id"] == "v-missing"
+    _validate("videos_status", out)
+
+
+def test_videos_status_never_calls_a_write_api(vodp_home, fake_youtube, capsys):
+    _seed_valid_token(vodp_home)
+    fake_youtube.queue("videos", "list", {"items": [
+        {"id": "v1", "status": {"uploadStatus": "processed"}, "processingDetails": {}},
+    ]})
+    _run(["videos", "status", "--home", str(vodp_home), "--non-interactive", "--video-id", "v1"], capsys)
+    assert {(c["resource"], c["method"]) for c in fake_youtube.calls} == {("videos", "list")}
+
+
 def test_videos_publish_success(vodp_home, fake_youtube, capsys):
     _seed_valid_token(vodp_home)
     fake_youtube.queue("videos", "list", {"items": [{"status": {"privacyStatus": "private"}}]})

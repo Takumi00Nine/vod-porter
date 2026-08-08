@@ -13,6 +13,7 @@ ALL_COMMANDS = [
     ("vods", "list"),
     ("vods", "upload"),
     ("videos", "list"),
+    ("videos", "status"),
     ("videos", "publish"),
     ("videos", "delete"),
     ("meta", "set"),
@@ -139,3 +140,15 @@ def test_meta_set_has_playlist_id_but_not_playlist_name():
     assert args.playlist_id == "PL1"
     assert not hasattr(args, "playlist")  # meta set never resolves/creates a playlist by name
     assert not hasattr(args, "playlist_privacy")
+
+
+def test_videos_status_accepts_multiple_video_ids():
+    args = parse_args(["videos", "status", "--video-id", "v1", "v2", "v3"])
+    assert args.video_ids == ["v1", "v2", "v3"]
+
+
+def test_videos_status_requires_at_least_one_video_id():
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["videos", "status"])
+    assert exc_info.value.code == 2
