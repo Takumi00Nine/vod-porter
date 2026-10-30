@@ -341,7 +341,7 @@ hand.
 ## Known limitations (time-boxed scope, flagged for follow-up)
 
 - Real API/OAuth end-to-end verification, and the actual repo move to
-  `~/work/tools/twitch-vods-to-youtube/`, are the lead's responsibility
+  `~/Workspace/Tools/twitch-vods-to-youtube/`, are the lead's responsibility
   (docs/design.md §11) -- everything in this repo is tested fully offline
   (`pytest -q`, socket access blocked by `tests/conftest.py`).
 - A stuck playlist-creation write-ahead row (`__playlist__:<name>`,
@@ -526,7 +526,7 @@ YouTube の `videos.insert` は冪等ではないため、vodp はこれを再�
 
 ## 既知の制限（時間制約付きスコープ、フォローアップ対象）
 
-- 実 API/OAuth の end-to-end 検証、および `~/work/tools/twitch-vods-to-youtube/` への実際のリポジトリ移動はリーダーの責任（docs/design.md §11）-- 本リポジトリ内のすべては完全にオフラインでテストされる（`pytest -q`、`tests/conftest.py` が実ソケット接続をブロック）。
+- 実 API/OAuth の end-to-end 検証、および `~/Workspace/Tools/twitch-vods-to-youtube/` への実際のリポジトリ移動はリーダーの責任（docs/design.md §11）-- 本リポジトリ内のすべては完全にオフラインでテストされる（`pytest -q`、`tests/conftest.py` が実ソケット接続をブロック）。
 - スタックしたプレイリスト作成のwrite-ahead行（`__playlist__:<name>`、`playlist_create_inflight`/`recovery_required`）は、*将来の*実行が候補VODを持ち、**かつ**同じプレイリストを再度要求した場合にのみ解消される -- 動画レベルの `recovery_required` 行のように範囲非依存で拾われるわけではない。`vodp ledger recover --channel ID` はスタックしている限りそれを一覧表示し続け、`vodp ledger resolve` もそれに対して機能し続ける。
 - `advance()` の `expected_stage` ガードは、遷移ごとに許可される具体的な直前段階を列挙するのではなく、行の*現在の*段階が一致することを受け入れる方式であるため、古い/順序違反の書き込みは検知できるが、理論上不正なものすべてを検知できるわけではない。
 

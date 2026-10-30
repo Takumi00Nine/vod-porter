@@ -34,7 +34,7 @@ UC5 AIのアドホック照会（VOD一覧・動画一覧・プレイリスト�
 - M18 preflight（DL前）: title≤100文字・**description≤5000バイト(UTF-8)**（★6 設計差し戻しで字→バイトに統一・公式仕様準拠・2026-07-27 リーダー承認）・tags合計≤500文字・`<` `>` 禁止・description-file 存在・未知テンプレ変数。CLI不正→2・環境不備→5。空き容量チェック=想定ビットレート×尺×1.2。ffprobe 必須（不在 exit 5）。AC: 各境界値テスト。
 - M19 ログ: logs/YYYY-MM-DD.log 1行1JSON（run_id・JST・保持期間規定）・yt-dlp 進捗抑制。AC: sentinel secret が stdout/stderr/ログに不出現・1実行ログ上限バイト内。
 - M20 pytest 一式（socket遮断・全モック）。AC: pytest -q オフライン緑。
-- M21 パス非依存（~/work/tools/twitch-vods-to-youtube/ へ移設前提）＋パッケージ化（pyproject＋console_scripts `vodp`）。AC: 任意 cwd から起動。
+- M21 パス非依存（~/Workspace/Tools/twitch-vods-to-youtube/ へ移設前提）＋パッケージ化（pyproject＋console_scripts `vodp`）。AC: 任意 cwd から起動。
 
 ## D. 推奨(S)／任意(C)
 S1 insert 100回/日バケット監視／S2 catch-up（--max-lookback-days）／S3 token pickle→JSON(authorized_user)・0600・旧pickle移行／S4 --check＝副作用ゼロ読取専用／S5 ruff/CI／S6 孤児掃除（台帳状態＋拡張子・ロック下・mtime基準）／S7 期待 channel_id 照合／S8 {episode} 自動採番。
